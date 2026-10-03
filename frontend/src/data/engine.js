@@ -54,9 +54,10 @@ function toRows(table) {
 }
 
 async function start() {
-  const t0 = performance.now();
   const marks = [];
-  const mark = (label) => marks.push(`${label} ${Math.round(performance.now() - t0)}`);
+  // Marks are ms since page navigation, so changes that start work before
+  // the engine does (e.g. the WASM preload in index.html) show up in them.
+  const mark = (label) => marks.push(`${label} ${Math.round(performance.now())}`);
   // manifest.json is the one file a deploy overwrites; everything else lives
   // under its versioned directory, so revalidate only this.
   const manifest = await fetch(new URL("manifest.json", DATA_BASE), { cache: "no-cache" })
