@@ -86,8 +86,10 @@ async function start() {
         if (!views.has(level)) {
           await conn.query(factViewSql(manifest, level, regName));
           views.add(level);
+          mark(`view:${level}`);
         }
       }
+      const q0 = performance.now();
       let table;
       if (params.length) {
         const stmt = await conn.prepare(sql);
@@ -100,6 +102,9 @@ async function start() {
         table = await conn.query(sql);
       }
       if (!firstFact && factTablesIn(sql).length) { firstFact = true; mark("first-fact-query"); }
+      // Per-query timings, kept for profiling from the console.
+      (globalThis.__dataQueries ??= []).push(
+        `${Math.round(performance.now() - q0)}ms ${sql.replace(/\s+/g, " ").trim().slice(0, 70)}`);
       return toRows(table);
     };
     const p = queue.then(run, run);
