@@ -132,10 +132,41 @@ async function start() {
   return api;
 }
 
+// The DuckDB WASM module as a blob URL. index.html preloads the file
+// (vite.config.js); a worker cannot take over the page's preload, so the
+// page reads the preloaded bytes here and hands them to the worker in memory.
+// Otherwise the worker downloads its own copy: 8 MB twice, and later.
+async function wasmModuleUrl() {
+  try {
+    const r = await fetch(wasmUrl); // same request as the preload link → reuses it
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const bytes = await r.arrayBuffer();
+    return { url: URL.createObjectURL(new Blob([bytes], { type: "application/wasm" })), blob: true };
+  } catch (err) {
+    console.warn("[data] WASM preload unavailable, worker fetches it:", err);
+    return { url: wasmUrl, blob: false };
+  }
+}
+
 async function startDuckDB(manifest, urlOf, mark) {
+  const wasm = wasmModuleUrl(); // under way while the worker script loads
   const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), new Worker(workerUrl));
-  await db.instantiate(wasmUrl);
+  const { url, blob } = await wasm;
+  try {
+    await db.instantiate(url);
+  } finally {
+    if (blob) URL.revokeObjectURL(url);
+  }
   mark("wasm");
+  // Parquet files are read WHOLE, one request per file, then served from
+  // memory for the rest of the session: with the default HTTP settings and
+  // GitHub Pages (which ignores Range on HEAD) DuckDB-WASM falls back to full
+  // reads. Deliberate: the fact files are small (~3.5 MB) and routed (schema.js),
+  // and DuckDB-WASM issues range requests one at a time. Measured 2026-10-03 at
+  // 40 ms latency / 10 MB/s: full reads 2 requests, first data 2.5-4.6 s; ranged
+  // reads ({ reliableHeadRequests: false, allowFullHTTPReads: true,
+  // forceFullHTTPReads: false } via db.open) ~25-30 sequential requests, first
+  // data 5.0-5.6 s. Revisit only if the files get much larger.
   const parquet = [
     ...Object.values(manifest.facts).flat(),
     ...Object.values(manifest.tables).filter((t) => t.file.endsWith(".parquet")),
