@@ -7,6 +7,34 @@
 
 import { getApi } from "./engine.js";
 
+// Requests in flight, for the loading indicator (DataLoadingIndicator.jsx):
+// `slow` turns true once requests have been pending SLOW_AFTER_MS without a
+// break, so quick queries never flash a spinner. Shaped for React's
+// useSyncExternalStore.
+const SLOW_AFTER_MS = 400;
+let pending = 0;
+let slow = false;
+let slowTimer = null;
+const listeners = new Set();
+const emit = () => listeners.forEach((l) => l());
+function setPending(n) {
+  pending = n;
+  if (pending > 0 && !slowTimer && !slow) {
+    slowTimer = setTimeout(() => { slowTimer = null; slow = true; emit(); }, SLOW_AFTER_MS);
+  } else if (pending === 0) {
+    clearTimeout(slowTimer);
+    slowTimer = null;
+    if (slow) { slow = false; emit(); }
+  }
+}
+export const pendingRequests = {
+  subscribe(listener) {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  },
+  isSlow: () => slow,
+};
+
 const abortError = () => new DOMException("The operation was aborted.", "AbortError");
 
 export async function apiFetch(input, init = {}) {
@@ -20,12 +48,21 @@ export async function apiFetch(input, init = {}) {
   const work = getApi().then((api) =>
     api.handle(url.pathname.slice(at), Object.fromEntries(url.searchParams))
   );
-  const { status, body } = await (signal
-    ? Promise.race([
-        work,
-        new Promise((_, reject) => signal.addEventListener("abort", () => reject(abortError()), { once: true })),
-      ])
-    : work);
+  // Counted until the caller stops waiting: on an abort the query may still
+  // run, but nothing on screen depends on it any more.
+  setPending(pending + 1);
+  let result;
+  try {
+    result = await (signal
+      ? Promise.race([
+          work,
+          new Promise((_, reject) => signal.addEventListener("abort", () => reject(abortError()), { once: true })),
+        ])
+      : work);
+  } finally {
+    setPending(pending - 1);
+  }
+  const { status, body } = result;
 
   return {
     ok: status >= 200 && status < 300,

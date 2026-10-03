@@ -7,6 +7,7 @@ import { faCanadianMapleLeaf } from "@fortawesome/free-brands-svg-icons";
 import { faChartSimple, faFilter } from "@fortawesome/free-solid-svg-icons";
 import { COLOR_FOCAL, COLOR_REF, COLOR_PROVINCE_BOUNDARY, HOVER_POPUP_DELAY_MS, COLOR_BRAND, CARTO_KEY, cartoTileUrl, DATA_LAST_UPDATED } from "./config";
 import { apiFetch } from "./data/apiFetch";
+import DataLoadingIndicator from "./DataLoadingIndicator";
 
 // The /api/* URLs are answered in the browser by data/routes.js (see
 // data/apiFetch.js); the origin only has to make them absolute.
@@ -1119,6 +1120,8 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
           edge of its cell, so it names the boundary it points at rather than
           floating between two classes. Reading an exact interior break is the
           thing this trades away. */}
+      <DataLoadingIndicator />
+
       {/* Top-left stack: the legend, then the selector-panel button beneath it.
           A flex column rather than a hand-computed offset, so the button
           follows the legend's height and sits at the top when there is no
