@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApi } from "../frontend/src/data/routes.js";
-import { schemaStatements } from "../frontend/src/data/schema.js";
+import { baseTableStatements, createFactRouter } from "../frontend/src/data/schema.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const arg = (name, dflt) => {
@@ -27,14 +27,29 @@ const manifest = JSON.parse(fs.readFileSync(path.join(DATA, "manifest.json"), "u
 const VDIR = path.join(DATA, manifest.version);
 
 // ── Ported API over Parquet, in Node ─────────────────────────────────────────
+// Same file routing as the browser (schema.js createFactRouter), so these
+// checks also prove each query finds all its rows in the files it opens.
+const src = (f) => path.join(VDIR, f);
 const conn = await (await DuckDBInstance.create(":memory:")).connect();
-for (const sql of schemaStatements(manifest, (f) => path.join(VDIR, f))) await conn.run(sql);
-const duckAll = async (sql, params = []) =>
-  (await conn.runAndReadAll(sql, params)).getRowObjects().map((row) => {
-    const out = {};
-    for (const k in row) out[k] = typeof row[k] === "bigint" ? Number(row[k]) : row[k];
-    return out;
-  });
+for (const sql of baseTableStatements(manifest, src)) await conn.run(sql);
+const index = manifest.tables.facts_index
+  ? JSON.parse(fs.readFileSync(src(manifest.tables.facts_index.file), "utf8"))
+  : null;
+const route = createFactRouter(manifest, index, src, (sql) => conn.run(sql));
+let queue = Promise.resolve(); // routing repoints views: one query at a time
+const duckAll = (sql, params = []) => {
+  const run = async () => {
+    await route(sql, params);
+    return (await conn.runAndReadAll(sql, params)).getRowObjects().map((row) => {
+      const out = {};
+      for (const k in row) out[k] = typeof row[k] === "bigint" ? Number(row[k]) : row[k];
+      return out;
+    });
+  };
+  const p = queue.then(run, run);
+  queue = p.catch(() => {});
+  return p;
+};
 const api = await createApi({
   duckAll,
   readJson: async (name) => JSON.parse(fs.readFileSync(path.join(VDIR, manifest.tables[name].file), "utf8")),

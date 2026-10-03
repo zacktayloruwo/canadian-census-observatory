@@ -4,7 +4,8 @@
 // static files the browser app reads through DuckDB-WASM:
 //
 //   <out>/manifest.json                  entry point; names the versioned dir
-//   <out>/<version>/facts/<lvl>_0.parquet  fact tables, one file per level
+//   <out>/<version>/facts/<lvl>_<n>.parquet  fact tables, small files (~3.5 MB)
+//   <out>/<version>/facts_index.json     which files hold each t_code / t_theme
 //   <out>/<version>/all_descr.parquet    variable catalogue (+ rid = original rowid)
 //   <out>/<version>/hlook.json, lineage.json  lookups, column-wise JSON
 //   <out>/<version>/geos.json, themes.json
@@ -16,7 +17,7 @@
 // Usage: node export-data.mjs [--src <dir with observatory_v3.duckdb>] [--out <dir>]
 //                              [--max-rows <rows per fact file>]
 //        defaults: ../../unicen_js/backend/data  →  ../frontend/public/data,
-//        one fact file per level
+//        2,000,000 rows per fact file
 
 import { DuckDBInstance } from "@duckdb/node-api";
 import fs from "node:fs";
@@ -32,13 +33,13 @@ const SRC = path.resolve(arg("src", path.join(here, "../../unicen_js/backend/dat
 const OUT = path.resolve(arg("out", path.join(here, "../frontend/public/data")));
 const DB = path.join(SRC, "observatory_v3.duckdb");
 
-// Rows per fact file; by default one file per level (ct/csd ≈ 90 MB). Opening
-// a file over HTTP costs DuckDB-WASM several sequential round trips (size
-// check, footer), so on GitHub Pages three CSD files took 3.4-4.7 s before the
-// first query; one file cuts that to a third. The files never go into git
-// (they ship as a release asset), so git's 100 MB limit doesn't apply.
-// --max-rows splits at theme boundaries instead (~1.75 bytes/row).
-const MAX_ROWS_PER_FILE = Number(arg("max-rows", Infinity));
+// Rows per fact file (~1.75 bytes/row, so 2M rows ≈ 3.5 MB). Small files on
+// purpose: on a cache miss GitHub Pages' CDN fetches the WHOLE file before
+// answering a range request (3.4 s for an 89 MB file, 0.2 s for 1.7 MB), and
+// sometimes answers with the whole file instead of the range. The browser
+// opens only the files a query needs (facts_index.json, see
+// frontend/src/data/schema.js), so a miss costs one small file.
+const MAX_ROWS_PER_FILE = Number(arg("max-rows", 2_000_000));
 const ROW_GROUP_SIZE = 100_000;
 const LEVELS = ["ct", "csd", "cd", "cma", "pr"];
 
@@ -57,10 +58,9 @@ const q = (s) => `'${s.replaceAll("'", "''")}'`;
 // the same build with the same layout land in the same directory, and a
 // layout change never reuses a URL a browser may hold in its cache.
 // Bump LAYOUT whenever the files' names or contents change for the same DB.
-const LAYOUT = 2; // 2: one fact file per level
+const LAYOUT = 3; // 2: one fact file per level; 3: small files + facts_index.json
 const mtime = fs.statSync(DB).mtime;
-const version = `v${mtime.toISOString().slice(0, 19).replace(/[-:T]/g, "")}-l${LAYOUT}${
-  Number.isFinite(MAX_ROWS_PER_FILE) ? `-r${MAX_ROWS_PER_FILE}` : ""}`;
+const version = `v${mtime.toISOString().slice(0, 19).replace(/[-:T]/g, "")}-l${LAYOUT}-r${MAX_ROWS_PER_FILE}`;
 const VDIR = path.join(OUT, version);
 fs.mkdirSync(path.join(VDIR, "facts"), { recursive: true });
 fs.mkdirSync(path.join(VDIR, "topology"), { recursive: true });
@@ -83,6 +83,14 @@ const FACT_COLS = `
 
 const manifest = { version, data_last_updated: mtime.toISOString().slice(0, 10), facts: {}, tables: {}, topology: {} };
 
+// facts_index.json: per level, which files (indexes into manifest.facts[lvl])
+// hold each t_code and each t_theme. The browser opens only those files.
+const factsIndex = {};
+const addTo = (map, key, chunk) => {
+  const list = (map[key] ??= []);
+  if (!list.includes(chunk)) list.push(chunk);
+};
+
 for (const lvl of LEVELS) {
   // Guard the narrowing casts above.
   const [chk] = await all(`
@@ -94,37 +102,53 @@ for (const lvl of LEVELS) {
     throw new Error(`${lvl}: t_level/level not integral: ${JSON.stringify(chk)}`);
   }
 
-  // Split on t_theme boundaries (the leading sort key) so a theme's rows,
-  // and therefore every query's rows, stay inside one file.
-  const themes = await all(`SELECT t_theme, count(*) n FROM ${lvl} WHERE loc = 't' GROUP BY 1 ORDER BY 1 NULLS LAST`);
-  const chunks = [];
-  let cur = [], rows = 0;
-  for (const t of themes) {
-    const n = Number(t.n);
-    if (cur.length && rows + n > MAX_ROWS_PER_FILE) { chunks.push(cur); cur = []; rows = 0; }
-    cur.push(t.t_theme); rows += n;
+  // Split between (t_theme, t_code) groups, in file sort order, so a code's
+  // rows never straddle two files (a large theme may span several).
+  const groups = await all(`
+    SELECT t_theme, t_code, count(*) n FROM ${lvl} WHERE loc = 't'
+    GROUP BY ALL ORDER BY t_theme NULLS LAST, t_code NULLS LAST`);
+  let chunk = 0, rows = 0;
+  for (const g of groups) {
+    const n = Number(g.n);
+    if (rows > 0 && rows + n > MAX_ROWS_PER_FILE) { chunk++; rows = 0; }
+    g.chunk = chunk;
+    rows += n;
   }
-  if (cur.length) chunks.push(cur);
+
+  // Tag every row with its chunk once, then write each chunk from the staged
+  // (sorted) copy, rather than re-filtering the source table per file.
+  await run(`CREATE OR REPLACE TEMP TABLE chunkmap (t_theme VARCHAR, t_code VARCHAR, chunk INTEGER)`);
+  for (let i = 0; i < groups.length; i += 1000) {
+    const values = groups.slice(i, i + 1000).map((g) =>
+      `(${g.t_theme == null ? "NULL" : q(g.t_theme)}, ${g.t_code == null ? "NULL" : q(g.t_code)}, ${g.chunk})`);
+    await run(`INSERT INTO chunkmap VALUES ${values.join(", ")}`);
+  }
+  await run(`
+    CREATE OR REPLACE TEMP TABLE staged AS
+    SELECT x.*, m.chunk
+    FROM (SELECT ${FACT_COLS} FROM ${lvl} WHERE loc = 't') x
+    JOIN chunkmap m
+      ON x.t_theme IS NOT DISTINCT FROM m.t_theme
+     AND x.t_code  IS NOT DISTINCT FROM m.t_code
+    ORDER BY x.t_theme NULLS LAST, x.t_code NULLS LAST, x."time", x.geosid`);
 
   manifest.facts[lvl] = [];
-  for (const [i, chunk] of chunks.entries()) {
+  factsIndex[lvl] = { codes: {}, themes: {} };
+  for (let i = 0; i <= chunk; i++) {
     const file = `facts/${lvl}_${i}.parquet`;
-    // A few rows carry no t_theme; they sort last and ride in the last file.
-    const named = chunk.filter((t) => t != null);
-    const lo = named[0], hi = named[named.length - 1];
-    const where = `t_theme BETWEEN ${q(lo)} AND ${q(hi)}` +
-      (named.length < chunk.length ? " OR t_theme IS NULL" : "");
     await run(`
-      COPY (
-        SELECT ${FACT_COLS} FROM ${lvl}
-        WHERE loc = 't' AND (${where})
-        ORDER BY t_theme NULLS LAST, t_code, "time", geosid
-      ) TO ${q(path.join(VDIR, file))}
+      COPY (SELECT * EXCLUDE (chunk) FROM staged WHERE chunk = ${i})
+      TO ${q(path.join(VDIR, file))}
       (FORMAT parquet, COMPRESSION zstd, COMPRESSION_LEVEL 9, ROW_GROUP_SIZE ${ROW_GROUP_SIZE})`);
-    const bytes = fs.statSync(path.join(VDIR, file)).size;
-    manifest.facts[lvl].push({ file, bytes, themes: [lo, hi] });
-    console.log(`${file}  ${(bytes / 1e6).toFixed(1)} MB  themes ${lo}..${hi}`);
+    manifest.facts[lvl].push({ file, bytes: fs.statSync(path.join(VDIR, file)).size });
   }
+  for (const g of groups) {
+    if (g.t_code != null) addTo(factsIndex[lvl].codes, g.t_code, g.chunk);
+    if (g.t_theme != null) addTo(factsIndex[lvl].themes, g.t_theme, g.chunk);
+  }
+  const mb = manifest.facts[lvl].map((f) => f.bytes / 1e6);
+  console.log(`${lvl}: ${mb.length} files, ${Math.min(...mb).toFixed(1)}-${Math.max(...mb).toFixed(1)} MB`);
+  await run("DROP TABLE staged");
 }
 
 // all_descr: queried by SQL (joins in the plot routes), so it goes into the
@@ -136,6 +160,17 @@ for (const lvl of LEVELS) {
     TO ${q(path.join(VDIR, file))} (FORMAT parquet, COMPRESSION zstd)`);
   manifest.tables.all_descr = { file, bytes: fs.statSync(path.join(VDIR, file)).size };
 }
+
+// Plot queries select a theme's rows through all_descr (JOIN ... d.t_theme = ?),
+// so a theme must also cover the files of every code all_descr lists under
+// it at that level, whatever t_theme the fact rows themselves carry.
+for (const { level, t_theme, t_code } of await all(
+  `SELECT DISTINCT level, t_theme, t_code FROM all_descr WHERE t_theme IS NOT NULL AND t_code IS NOT NULL`
+)) {
+  for (const chunk of factsIndex[level]?.codes[t_code] ?? []) addTo(factsIndex[level].themes, t_theme, chunk);
+}
+fs.writeFileSync(path.join(VDIR, "facts_index.json"), JSON.stringify(factsIndex));
+manifest.tables.facts_index = { file: "facts_index.json", bytes: fs.statSync(path.join(VDIR, "facts_index.json")).size };
 
 // hlook and the geouid concordance are never queried by SQL: the API reads
 // them once into in-memory maps. They ship pre-extracted as column-wise JSON

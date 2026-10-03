@@ -27,15 +27,17 @@ React app ──fetch("/api/…")──► data/apiFetch.js ──► data/route
 - **`frontend/src/data/apiFetch.js`** — a `fetch` stand-in for `/api/*` URLs.
   The components only changed `fetch(` → `apiFetch(`.
 - **`frontend/src/data/engine.js`** — starts DuckDB-WASM and loads the lookups
-  in parallel. A fact view is created the first time a query uses it, so
-  start-up reads only the Parquet footers it needs.
+  in parallel. Before each query, the router in `schema.js` points the fact
+  view at only the files holding that query's variables (`facts_index.json`).
 - **`tools/export-data.mjs`** — turns the server's `observatory_v3.duckdb` and
   its sidecars into `frontend/public/data/` (manifest + one versioned
   directory). Fact tables keep only the 9 columns the app reads, are sorted by
   theme/code/year/geosid (so a query touches a couple of 100k-row groups), and
-  ship as one file per level: each extra file costs DuckDB-WASM sequential
-  round trips before the first query. `--max-rows` splits them instead.
-- **`tools/compare.mjs`** — runs `routes.js` in Node over the exported files and
+  are split between variables into ~3.5 MB files (`--max-rows`, default 2M).
+  Small files matter on GitHub Pages: on a cache miss its CDN fetches the whole
+  file before answering a range request (3.4 s for an 89 MB file, 0.2 s for
+  1.7 MB), and occasionally sends the whole file instead of the range.
+- **`tools/compare.mjs`** — runs `routes.js` in Node, with the same file routing, over the exported files and
   compares ~3,700 responses with the running Express server. They should all
   match, except that `/api/themes?level=4&year=2016` can differ in the order of
   `lnmt`/`lnof`: the server's own order for those two changes between runs.
@@ -44,7 +46,7 @@ React app ──fetch("/api/…")──► data/apiFetch.js ──► data/route
 
 | | |
 |---|---|
-| Fact Parquet (ct, csd, cd, cma, pr) | 191 MB, one file per level, largest 95 MB |
+| Fact Parquet (ct, csd, cd, cma, pr) | 191 MB in 59 files of 0.4–5.5 MB, plus a 0.5 MB index |
 | Lookups (hlook, lineage, geos, themes, all_descr) | 22 MB (JSON gzipped by Pages) |
 | TopoJSON bundles, 1851–2021 | 124 MB (gzipped by Pages) |
 | App + DuckDB-WASM | 37 MB (8 MB gzipped) |

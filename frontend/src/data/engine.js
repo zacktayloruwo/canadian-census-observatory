@@ -8,7 +8,7 @@ import * as duckdb from "@duckdb/duckdb-wasm";
 import wasmUrl from "@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url";
 import workerUrl from "@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url";
 import { createApi } from "./routes.js";
-import { baseTableStatements, factTablesIn, factViewSql } from "./schema.js";
+import { baseTableStatements, createFactRouter, factTablesIn } from "./schema.js";
 
 const DATA_BASE = new URL(`${import.meta.env.BASE_URL}data/`, window.location.href);
 
@@ -72,24 +72,25 @@ async function start() {
   // DuckDB, so they load meanwhile and in-memory routes (search, lineage,
   // level) answer before the engine is up.
   const connReady = startDuckDB(manifest, urlOf, mark);
+  // Which fact files hold each variable (tools/export-data.mjs); without it
+  // the router falls back to opening every file of a level.
+  const indexReady = manifest.tables.facts_index
+    ? fetch(urlOf(manifest.tables.facts_index.file)).then((r) => r.json()).catch(() => null)
+    : Promise.resolve(null);
+  const routerReady = Promise.all([connReady, indexReady]).then(([conn, index]) =>
+    createFactRouter(manifest, index, regName, (sql) => conn.query(sql)));
   connReady.catch(() => { apiPromise = null; }); // let the next call retry
 
   // One connection, one query at a time: the worker executes serially anyway,
   // and a queue keeps prepared statements from interleaving.
   let queue = Promise.resolve();
-  const views = new Set(); // fact views created so far (see factViewSql)
   let firstFact = false;
   const duckAll = (sql, params = []) => {
     const run = async () => {
       const conn = await connReady;
-      for (const level of factTablesIn(sql)) {
-        if (!views.has(level)) {
-          await conn.query(factViewSql(manifest, level, regName));
-          views.add(level);
-          mark(`view:${level}`);
-        }
-      }
+      const route = await routerReady;
       const q0 = performance.now();
+      await route(sql, params); // point the fact views at this query's files
       let table;
       if (params.length) {
         const stmt = await conn.prepare(sql);
@@ -140,6 +141,7 @@ async function startDuckDB(manifest, urlOf, mark) {
   ];
   await Promise.all(parquet.map((f) =>
     db.registerFileURL(regName(f.file), urlOf(f.file), duckdb.DuckDBDataProtocol.HTTP, false)));
+  mark("register");
   const conn = await db.connect();
   // Keep Parquet footers and HTTP HEAD results between queries. Both caches
   // are off by default, so every fact query re-fetched and re-parsed its
@@ -148,6 +150,7 @@ async function startDuckDB(manifest, urlOf, mark) {
   for (const setting of ["parquet_metadata_cache", "enable_http_metadata_cache"]) {
     await conn.query(`SET ${setting} = true`).catch((err) => console.warn(`[data] ${setting}:`, err));
   }
+  mark("settings");
   for (const sql of baseTableStatements(manifest, regName)) await conn.query(sql);
   mark("duckdb");
   return conn;
