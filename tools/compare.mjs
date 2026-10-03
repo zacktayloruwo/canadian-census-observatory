@@ -53,11 +53,11 @@ const duckAll = (sql, params = []) => {
 const api = await createApi({
   duckAll,
   readJson: async (name) => JSON.parse(fs.readFileSync(path.join(VDIR, manifest.tables[name].file), "utf8")),
-  readTopology: async (year, cma = null) => {
-    const f = cma ? manifest.topology[year]?.ct?.[cma] : manifest.topology[year];
+  readTopology: async (year, level = null, key = null) => {
+    const f = key ? manifest.topology[year]?.parts?.[level]?.[key] : manifest.topology[year];
     return f ? JSON.parse(fs.readFileSync(path.join(VDIR, f.file), "utf8")) : null;
   },
-  ctCmas: (year) => manifest.topology[year]?.ct ?? {},
+  topologyParts: (year, level) => manifest.topology[year]?.parts?.[level] ?? {},
 });
 
 const local = async (url) => {
@@ -127,6 +127,10 @@ const fixed = [
   "/api/geometry?level=3&year=1911", "/api/geometry?level=4&year=2021",
   "/api/geometry?level=1&year=2021", "/api/geometry?level=1&year=1951", // tracts from per-CMA bundles
   "/api/geo-polygon?geosid=5350001.00&year=2021", "/api/geo-polygon?geosid=5050001.00&year=1976",
+  // CSDs and CDs from per-province parts, incl. a disputed-territory year
+  "/api/geometry?level=2&year=2021", "/api/geometry?level=2&year=1921", "/api/geometry?level=3&year=1881",
+  "/api/geo-polygon?geosid=3506008&year=2021", "/api/geo-polygon?geosid=3506&year=2021",
+  "/api/geo-polygon?geosid=4610001&year=1911", "/api/boundaries?level=3&year=2021",
   "/api/geo-polygon?geosid=35&year=2021", "/api/geo-polygon?geosid=4611040&year=1966",
   "/api/values?level=1&year=2021&t_code=dnk2",
   // variables a level doesn't have: the router reads an empty table

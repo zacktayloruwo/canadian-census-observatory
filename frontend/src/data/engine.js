@@ -123,17 +123,17 @@ async function start() {
   };
 
   const readJson = (name) => fetch(urlOf(manifest.tables[name].file)).then((r) => r.json());
-  // A year's base bundle, or with a cma that CMA's census-tract bundle.
-  const readTopology = async (year, cma = null) => {
-    const f = cma ? manifest.topology[year]?.ct?.[cma] : manifest.topology[year];
+  // A year's base bundle, or one area part of a split level (tools/topology-split.mjs).
+  const readTopology = async (year, level = null, key = null) => {
+    const f = key ? manifest.topology[year]?.parts?.[level]?.[key] : manifest.topology[year];
     if (!f) return null;
     const r = await fetch(urlOf(f.file));
-    if (!r.ok) throw new Error(`topology ${year}${cma ? ` ct ${cma}` : ""}: HTTP ${r.status}`);
+    if (!r.ok) throw new Error(`topology ${year}${key ? ` ${level} ${key}` : ""}: HTTP ${r.status}`);
     return r.json();
   };
-  const ctCmas = (year) => manifest.topology[year]?.ct ?? {};
+  const topologyParts = (year, level) => manifest.topology[year]?.parts?.[level] ?? {};
 
-  const api = await createApi({ duckAll, readJson, readTopology, ctCmas, log: (m) => m.startsWith("startup:") && mark(m.slice(8)) });
+  const api = await createApi({ duckAll, readJson, readTopology, topologyParts, log: (m) => m.startsWith("startup:") && mark(m.slice(8)) });
   mark("lookups");
   connReady.then(() => {
     globalThis.__dataStartup = marks; // for profiling from the console

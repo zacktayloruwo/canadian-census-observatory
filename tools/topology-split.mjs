@@ -1,13 +1,24 @@
 // tools/topology-split.mjs
 //
-// Split a census year's TopoJSON bundle so census tracts load per CMA:
-//   base           every object except `ct`, with only the arcs they use
-//   ct[<cmauid>]   one topology per CMA holding that CMA's tracts
-// Tracts exist only inside CMAs and their ids start with the CMA code
-// (5350001.00 → 535); every tract prefix has a CMA polygon in its year
-// (checked 1951-2021). Arcs are copied as-is (still quantized, delta-encoded
-// under the same transform), so geometry is byte-for-byte what the original
-// bundle decodes to.
+// Split a census year's TopoJSON bundle so the fine levels load by area:
+//   base                  every object not split below (pr, cma), with only
+//                         the arcs it uses
+//   parts.ct[<cmauid>]    census tracts, one topology per CMA
+//   parts.csd[<pruid>]    census subdivisions, one topology per province
+//   parts.cd[<pruid>]     census divisions, one topology per province
+// Part keys come from the ids: a tract id starts with its CMA code
+// (5350001.00 → 535), CSD and CD ids with the province code (3506008 → 35,
+// 3506 → 35). An id with no such prefix (the disputed-territory polygon
+// "DISP" in 1881, 1911 and 1921) is a part of its own. Arcs are copied as-is
+// (still quantized, delta-encoded under the same transform), so geometry is
+// byte-for-byte what the original bundle decodes to.
+
+/** Part key of a feature id at a split level. */
+export const PART_OF = {
+  ct: (id) => String(id).slice(0, 3),
+  csd: (id) => (/^\d{2}/.test(String(id)) ? String(id).slice(0, 2) : String(id)),
+  cd: (id) => (/^\d{2}/.test(String(id)) ? String(id).slice(0, 2) : String(id)),
+};
 
 /** Topology with only `objects`, keeping just the arcs they reference. */
 export function subsetTopology(topo, objects) {
@@ -50,19 +61,23 @@ export function arcsBbox(topo) {
   return [w, s, e, n].map((v) => Math.round(v * 1e5) / 1e5);
 }
 
-/** CMA code of a tract id. */
-export const cmaOfTract = (geosid) => String(geosid).slice(0, 3);
-
-/** { base, ct: { cmauid: topology } } — ct is {} for years without tracts. */
-export function splitByCma(topo) {
-  const { ct, ...rest } = topo.objects;
-  const base = subsetTopology(topo, rest);
-  base.bbox = topo.bbox ?? base.bbox;
-  const byCma = {};
-  for (const g of ct?.geometries ?? []) (byCma[cmaOfTract(g.properties.geosid)] ??= []).push(g);
-  const out = {};
-  for (const [cma, geometries] of Object.entries(byCma)) {
-    out[cma] = subsetTopology(topo, { ct: { ...ct, geometries } });
+/** { base, parts: { level: { key: topology } } } — a level absent from the
+ *  bundle has no parts. */
+export function splitTopology(topo) {
+  const objects = { ...topo.objects };
+  const parts = {};
+  for (const [level, partOf] of Object.entries(PART_OF)) {
+    const obj = objects[level];
+    if (!obj) continue;
+    delete objects[level];
+    const byKey = {};
+    for (const g of obj.geometries) (byKey[partOf(g.properties.geosid)] ??= []).push(g);
+    parts[level] = {};
+    for (const [key, geometries] of Object.entries(byKey)) {
+      parts[level][key] = subsetTopology(topo, { [level]: { ...obj, geometries } });
+    }
   }
-  return { base, ct: out };
+  const base = subsetTopology(topo, objects);
+  base.bbox = topo.bbox ?? base.bbox;
+  return { base, parts };
 }

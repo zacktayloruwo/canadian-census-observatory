@@ -303,23 +303,28 @@ function ZoomToNational({ center, zoom }) {
 
 // --- Viewport reporter ---------------------------------------------------------
 // Reports the visible extent ([west, south, east, north]) once on mount and
-// after every pan or zoom, so App can load census tracts for the CMAs in view.
+// after every pan or zoom, so App can load boundaries for the area in view.
+// The mount report is flagged `initial`: the map then still shows its
+// national starting view, which it leaves as soon as a selection is fitted.
 
 function ViewportReporter({ onChange }) {
   const map = useMap();
-  const report = () => {
+  const report = (initial) => {
     const b = map.getBounds();
-    onChange?.([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+    onChange?.([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()], initial);
   };
-  useMapEvents({ moveend: report });
-  useEffect(report, [map]); // eslint-disable-line react-hooks/exhaustive-deps
+  useMapEvents({ moveend: () => report(false) });
+  useEffect(() => report(true), [map]); // eslint-disable-line react-hooks/exhaustive-deps
   return null;
 }
 
 // --- Zoom helper -------------------------------------------------------------
 
-function ZoomToSelected({ geojson, selectedGeosid }) {
+function ZoomToSelected({ geojson, selectedGeosid, onSettled }) {
   const map = useMap();
+  // onSettled: called once a new selection's zoom is decided (fitted or left
+  // alone), so App can stop holding the boundaries it loads to the
+  // selection's area. A stable callback (useCallback in App).
 
   // Zoom only when the SELECTION changes, not when the geometry object does —
   // geometry gets a new identity on every (level, year) change, and refitting
@@ -348,21 +353,27 @@ function ZoomToSelected({ geojson, selectedGeosid }) {
     const bounds = tempLayer.getBounds();
 
     if (bounds && bounds.isValid && bounds.isValid()) {
-      // Already fully on screen (typically a polygon just clicked): leave the
-      // view alone. Otherwise fit it, capping the zoom-in at level 10 or the
-      // current zoom, whichever is closer, so the cap never forces a zoom-out
-      // (it used to pull a zoomed-in map back to 10 on every click). The fit
-      // still zooms out when the polygon is too big to show at this zoom.
-      if (!map.getBounds().contains(bounds)) {
+      // Never zoom OUT to show a polygon already fully on screen (a click on
+      // a zoomed-in map used to pull the view back to level 10): such a
+      // polygon is only zoomed IN to, up to level 10, when small on screen
+      // (e.g. picked from the search box at the national view). One that is
+      // off screen is fitted with the cap at level 10 or the current zoom,
+      // whichever is higher, so the cap itself never forces a zoom-out; the
+      // fit still zooms out when the polygon is too big for the view.
+      if (map.getBounds().contains(bounds)) {
+        const target = Math.min(map.getBoundsZoom(bounds, false, L.point(40, 40)), 10);
+        if (target > map.getZoom()) map.fitBounds(bounds, { maxZoom: 10, padding: [20, 20] });
+      } else {
         map.fitBounds(bounds, {
           maxZoom: Math.max(10, map.getZoom()),
           padding: [20, 20],
         });
       }
       lastZoomedRef.current = selectedGeosid;
+      onSettled?.();
     }
 
-  }, [geojson, selectedGeosid, map]);
+  }, [geojson, selectedGeosid, map, onSettled]);
 
   return null;
 }
@@ -419,7 +430,8 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
   // Changes when the features of a (level, year) grow: census tracts arrive
   // per CMA as the map moves, and the layer must remount to draw them.
   geometryKey = "",
-  onViewportChange, // ([west, south, east, north]) after each pan/zoom
+  onViewportChange, // ([west, south, east, north], initial) on mount and after each pan/zoom
+  onSelectionSettled, // () once a new selection's zoom is decided
   values,        // Map<geosid, displayValue> — swapped on variable/mode change, layer persists
   level,
   year,
@@ -950,6 +962,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
             <ZoomToSelected
               geojson={featureCollection}
               selectedGeosid={selectedGeosid}
+              onSettled={onSelectionSettled}
             />
             <ZoomOnRequest
               geojson={featureCollection}

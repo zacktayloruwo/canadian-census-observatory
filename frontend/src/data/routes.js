@@ -21,14 +21,15 @@
 // createApi({ duckAll, readJson, readTopology, log? }) → { handle(path, query) }
 //   duckAll(sql, params)  → Promise<row objects>, numbers not BigInts
 //   readJson(name)        → Promise<parsed JSON: geos | themes | hlook | lineage>
-//   readTopology(year, cma?) → Promise<topology object | null>; with a cma,
-//                           that CMA's census-tract bundle
-//   ctCmas(year)          → { cmauid: { bbox } } tract bundles of a year ({} if none)
+//   readTopology(year, level?, key?) → Promise<topology | null>: the year's
+//                           base bundle, or one area part of a split level
+//   topologyParts(year, level) → { key: { bbox } } parts of a split level
+//                           ("ct", "csd", "cd"); {} when it isn't split
 //   handle(...)           → Promise<{ status, body }>
 
 import { feature as topoFeature } from "topojson-client";
 
-export async function createApi({ duckAll, readJson, readTopology, ctCmas = () => ({}), log = () => {} }) {
+export async function createApi({ duckAll, readJson, readTopology, topologyParts = () => ({}), log = () => {} }) {
   // ── Express-shaped shim ────────────────────────────────────────────────────
   const ROUTES = new Map();
   const app = { get: (p, h) => ROUTES.set(p, h) };
@@ -644,64 +645,80 @@ export async function createApi({ duckAll, readJson, readTopology, ctCmas = () =
   // server.js built /api/geometry, /api/boundaries and /api/geo-polygon from
   // WKB in the geoms table. The per-year bundles carry the same features
   // (same pipeline output, properties geosid/geoname/prname + flags), so the
-  // static version cuts all three from the bundle.
+  // static version cuts all three from the bundles.
   //
-  // Census tracts are split out per CMA (tools/topology-split.mjs): the
-  // year's base bundle holds the other levels, and ctCmas(year) lists the
-  // per-CMA tract bundles ({ cmauid: { bbox } }) read by readTopology(year,
-  // cmauid). Data built before the split has tracts in the base bundle;
-  // ctCmas() is then empty and everything reads the base bundle as before.
-  const TOPOLOGY_CACHE = new Map(); // "year" | "year|cma" → Promise<topology | null>
-  function getTopology(year, cma = null) {
-    const key = cma ? `${year}|${cma}` : String(year);
-    if (!TOPOLOGY_CACHE.has(key)) {
-      const p = readTopology(year, cma).catch((err) => {
-        TOPOLOGY_CACHE.delete(key); // don't cache transient failures
+  // The fine levels are split by area (tools/topology-split.mjs): census
+  // tracts per CMA, CSDs and CDs per province. A year's base bundle holds the
+  // rest; topologyParts(year, level) lists a split level's parts
+  // ({ key: { bbox } }), read by readTopology(year, level, key). Data built
+  // before a split has the level in the base bundle; it then has no parts and
+  // is read from the base bundle as before.
+  const TOPOLOGY_CACHE = new Map(); // "year|level|key" → Promise<topology | null>
+  function getTopology(year, level = null, key = null) {
+    const k = `${year}|${level ?? ""}|${key ?? ""}`;
+    if (!TOPOLOGY_CACHE.has(k)) {
+      const p = readTopology(year, level, key).catch((err) => {
+        TOPOLOGY_CACHE.delete(k); // don't cache transient failures
         throw err;
       });
-      TOPOLOGY_CACHE.set(key, p);
-      // Base bundles are MB-sized; tract bundles small and numerous.
-      while (TOPOLOGY_CACHE.size > 120) TOPOLOGY_CACHE.delete(TOPOLOGY_CACHE.keys().next().value);
+      TOPOLOGY_CACHE.set(k, p);
+      // Base bundles are MB-sized; parts small and numerous.
+      while (TOPOLOGY_CACHE.size > 200) TOPOLOGY_CACHE.delete(TOPOLOGY_CACHE.keys().next().value);
     }
-    return TOPOLOGY_CACHE.get(key);
+    return TOPOLOGY_CACHE.get(k);
   }
-  const cmaOfTract = (geosid) => String(geosid).slice(0, 3);
+
+  // The part an id belongs to at a split level, or null when the id has the
+  // wrong shape for that level (a tract id has a decimal part; CSD ids have
+  // 7 digits, CD ids 4; a non-numeric id like "DISP" is its own part).
+  const PART_OF = {
+    ct: (id) => (id.includes(".") ? id.slice(0, 3) : null),
+    csd: (id) => (/^\d{7}$/.test(id) ? id.slice(0, 2) : /^\d+$/.test(id) ? null : id),
+    cd: (id) => (/^\d{4}$/.test(id) ? id.slice(0, 2) : /^\d+$/.test(id) ? null : id),
+  };
 
   async function levelCollection(levelNum, year) {
-    const cmas = Object.keys(ctCmas(year));
-    if (LEVEL_CODE[levelNum] === "ct" && cmas.length) {
-      const parts = await Promise.all(cmas.map((cma) => getTopology(year, cma)));
+    const code = LEVEL_CODE[levelNum];
+    const keys = Object.keys(topologyParts(year, code));
+    if (keys.length) {
+      const parts = await Promise.all(keys.map((k) => getTopology(year, code, k)));
       return { type: "FeatureCollection",
-               features: parts.flatMap((t) => (t ? topoFeature(t, t.objects.ct).features : [])) };
+               features: parts.flatMap((t) => (t ? topoFeature(t, t.objects[code]).features : [])) };
     }
     const topo = await getTopology(year);
-    const obj = topo?.objects?.[LEVEL_CODE[levelNum]];
+    const obj = topo?.objects?.[code];
     if (!obj) return { type: "FeatureCollection", features: [] };
     return topoFeature(topo, obj);
   }
 
-  // GET /api/ct-index?year=2021 → { year, cmas: { cmauid: [w, s, e, n] } }
-  // The per-CMA tract bundles of a year and their extents, so the map can
-  // load tracts for the CMAs in view. Empty when tracts are in the base bundle.
-  app.get("/api/ct-index", (req, res) => {
+  // GET /api/parts?year=2021&level=2 → { year, level, parts: { key: [w, s, e, n] } }
+  // The area parts of a split level in a year and their extents, so the map
+  // can load the parts in view. Empty when the level is in the base bundle.
+  app.get("/api/parts", (req, res) => {
     const year = req.query.year ? Number(req.query.year) : null;
+    const levelNum = Number(req.query.level);
     if (!year || Number.isNaN(year)) {
       return res.status(400).json({ error: "year is required and must be a number" });
     }
-    const cmas = Object.fromEntries(Object.entries(ctCmas(year)).map(([cma, v]) => [cma, v.bbox]));
-    res.json({ year, cmas });
+    if (!LEVEL_CODE[levelNum]) return res.status(400).json({ error: "valid level (1-5) is required" });
+    const parts = Object.fromEntries(
+      Object.entries(topologyParts(year, LEVEL_CODE[levelNum])).map(([k, v]) => [k, v.bbox]));
+    res.json({ year, level: levelNum, parts });
   });
 
-  // GET /api/topology?year=2021            the year's base bundle
-  // GET /api/topology?year=2021&ct_cma=535 one CMA's census tracts
+  // GET /api/topology?year=2021                     the year's base bundle
+  // GET /api/topology?year=2021&level=2&part=35     one part of a split level
   app.get("/api/topology", (req, res) => {
     const year = req.query.year ? Number(req.query.year) : null;
     if (!year || Number.isNaN(year)) {
       return res.status(400).json({ error: "year is required and must be a number" });
     }
-    const cma = req.query.ct_cma ? String(req.query.ct_cma) : null;
-    if (cma && !ctCmas(year)[cma]) return res.status(404).json({ error: "no tract bundle for this CMA and year" });
-    getTopology(year, cma)
+    const code = req.query.level ? LEVEL_CODE[Number(req.query.level)] : null;
+    const key = req.query.part ? String(req.query.part) : null;
+    if (key && !(code && topologyParts(year, code)[key])) {
+      return res.status(404).json({ error: "no such part for this level and year" });
+    }
+    getTopology(year, key ? code : null, key)
       .then((topo) => topo
         ? res.json(topo)
         : res.status(404).json({ error: "no topology bundle for this year" }))
@@ -750,11 +767,15 @@ export async function createApi({ duckAll, readJson, readTopology, ctCmas = () =
     }
 
     try {
-      // The base bundle first, then (for a tract) its CMA's tract bundle.
-      const cma = cmaOfTract(geosid);
-      const sources = [await getTopology(resolvedYear)];
-      if (ctCmas(resolvedYear)[cma]) sources.push(await getTopology(resolvedYear, cma));
-      for (const topo of sources) {
+      // The base bundle first, then the part this id would belong to at each
+      // split level (fetched only when such a part exists).
+      const sources = [() => getTopology(resolvedYear)];
+      for (const [code, partOf] of Object.entries(PART_OF)) {
+        const key = partOf(geosid);
+        if (key && topologyParts(resolvedYear, code)[key]) sources.push(() => getTopology(resolvedYear, code, key));
+      }
+      for (const load of sources) {
+        const topo = await load();
         for (const obj of Object.values(topo?.objects ?? {})) {
           const geom = obj.geometries?.find((g) => String(g.properties?.geosid) === geosid);
           if (!geom) continue;

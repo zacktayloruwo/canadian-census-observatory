@@ -9,7 +9,7 @@
 // State lives in a single useReducer (see `reducer` below).
 // API calls are in individual useEffect hooks, each dependent on the
 // subset of state they need.
-import React, { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import * as topojson from "topojson-client";
 import {
   AppShell, Group, Stack, Title, Text, TextInput,
@@ -89,6 +89,10 @@ const LEVEL_NAME = {
 // it only to within a thousand kilometres, while "5550004.01, London" places
 // it. Every other level keeps the province.
 const CT_LEVEL = 1;
+// Levels whose boundaries load by area (CT per CMA, CSD and CD per province),
+// and their TopoJSON object names.
+const SPLIT_LEVELS = new Set([1, 2, 3]);
+const SPLIT_OBJECT = { 1: "ct", 2: "csd", 3: "cd" };
 
 
 
@@ -1021,36 +1025,51 @@ function expandTopologyLevel(topo, level) {
   return topojson.feature(topo, topo.objects[objName]);
 }
 
-// --- Census tracts, loaded per CMA ---------------------------------------------
-// Tract boundaries ship as one small TopoJSON file per CMA and census year
-// (tools/topology-split.mjs); the year's base bundle holds every other level.
-// At the tract level the map loads the CMAs whose extent intersects the view,
-// plus the CMAs of the selected tracts, and more as the user pans. A year's
-// index ({ cmauid: [w, s, e, n] }) is empty for data built before the split,
-// whose base bundle still carries the tracts (the generic path below).
-const [viewport, setViewport] = useState(null);                // [w, s, e, n], from the map
-const ctIndexRef = useRef(new Map());                          // year → Promise<{ cmauid: bbox }>
-const ctFeaturesRef = useRef(new Map());                       // year → Map<cmauid, Feature[]>
-const CT_YEARS_KEPT = 3;
+// --- Fine levels, loaded by area -------------------------------------------------
+// Census tract boundaries ship as one TopoJSON file per CMA, CSDs and CDs as
+// one per province (tools/topology-split.mjs); a year's base bundle holds the
+// provinces and CMAs. At a split level the map loads the parts whose extent
+// intersects the view plus the parts of the selected geographies, and more as
+// the user pans. A level's part index ({ key: [w, s, e, n] }) is empty for
+// data built before the split; the level then comes from the base bundle
+// (the generic path below).
+const [viewport, setViewport] = useState(null);                // { bounds: [w, s, e, n], initial }, from the map
+const handleViewport = useCallback((bounds, initial) => setViewport({ bounds, initial }), []);
+// The map settled its zoom for a selection without moving (it was already in
+// view): the starting view is then the real one.
+const handleSelectionSettled = useCallback(
+  () => setViewport((v) => (v?.initial ? { ...v, initial: false } : v)), []);
+const partIndexRef = useRef(new Map());                        // "year|level" → Promise<{ key: bbox }>
+const partFeaturesRef = useRef(new Map());                     // "year|level" → Map<key, Feature[]>
+const PART_SETS_KEPT = 4;
 
-function getCtIndex(year) {
-  const cache = ctIndexRef.current;
-  if (!cache.has(year)) {
-    cache.set(year, apiFetch(`${API_BASE}/api/ct-index?year=${year}`)
+function getPartIndex(year, level) {
+  const cache = partIndexRef.current;
+  const k = `${year}|${level}`;
+  if (!cache.has(k)) {
+    cache.set(k, apiFetch(`${API_BASE}/api/parts?year=${year}&level=${level}`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => d?.cmas ?? {})
+      .then((d) => d?.parts ?? {})
       .catch(() => {
-        cache.delete(year); // retry next time
+        cache.delete(k); // retry next time
         return {};
       }));
   }
-  return cache.get(year);
+  return cache.get(k);
 }
 
 const bboxesIntersect = (a, b) => a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3];
-// Tract ids carry a decimal part (5350001.00); their first three digits are the CMA.
-const cmaOfTract = (geosid) => (geosid && String(geosid).includes(".") ? String(geosid).slice(0, 3) : null);
-
+// The part a geography belongs to at a split level, or null when its id has
+// another level's shape: tract ids carry a decimal part and start with their
+// CMA code (5350001.00); CSD (7-digit) and CD (4-digit) ids start with their
+// province code; a non-numeric id ("DISP") is its own part.
+function partOf(level, geosid) {
+  if (!geosid) return null;
+  const id = String(geosid);
+  if (level === CT_LEVEL) return id.includes(".") ? id.slice(0, 3) : null;
+  if (!/^\d+$/.test(id)) return id;
+  return id.length === (level === 2 ? 7 : 4) ? id.slice(0, 2) : null;
+}
 // CT → CMA name for the whole level, fetched once per year while tracts are
 // showing. The map's polygons come from the static per-year TopoJSON bundles,
 // whose feature properties carry prname only, so the metro names cannot ride
@@ -1115,10 +1134,10 @@ useEffect(() => {
         setGeometryPayload({ fc, level: state.level, year: state.year });
       };
 
-      // Tracts split per CMA: the loader effect below builds the tract layer;
+      // A level split by area: the loader effect below builds its layer;
       // here only the base bundle is fetched, for the province overlay.
-      const perCmaTracts = state.level === CT_LEVEL
-        && Object.keys(await getCtIndex(state.year)).length > 0;
+      const splitByArea = SPLIT_LEVELS.has(state.level)
+        && Object.keys(await getPartIndex(state.year, state.level)).length > 0;
 
       // 1) Preferred path: the year's TopoJSON bundle (all levels, shared arcs).
       const topoCache = topologyCacheRef.current;
@@ -1144,7 +1163,7 @@ useEffect(() => {
           topoCache.delete(topoCache.keys().next().value);
         }
       }
-      if (perCmaTracts) return;
+      if (splitByArea) return;
       if (topo) {
         const fc = expandTopologyLevel(topo, state.level);
         if (fc) {
@@ -1185,40 +1204,53 @@ const provincesFC = useMemo(() => {
   // resolution is the signal that the year's bundle (or its absence) is known.
 }, [state.year, geometryPayload]);
 
-// Tract loader: fetch the per-CMA tract files the view (and the selected
-// tracts) need, then publish every tract loaded so far for the year as the
-// layer. Its key changes with the number of CMAs loaded, so the map remounts
-// the layer when more arrive.
+// Area loader: fetch the parts of a split level the view (and the selected
+// geographies) need, then publish every part loaded so far for the year and
+// level as the layer. Its key changes with the number of parts loaded, so the
+// map remounts the layer when more arrive.
 useEffect(() => {
-  if (state.level !== CT_LEVEL || !state.year) return;
+  if (!SPLIT_LEVELS.has(state.level) || !state.year) return;
   if (state.geosid && levelFor !== state.geosid) return;
-  const year = state.year;
+  const year = state.year, level = state.level;
+  const objName = SPLIT_OBJECT[level];
   let cancelled = false;
   (async () => {
-    const index = await getCtIndex(year);
-    if (cancelled || !Object.keys(index).length) return; // tracts in the base bundle
-    const wanted = new Set(Object.keys(index).filter((c) => viewport && bboxesIntersect(index[c], viewport)));
-    for (const g of [state.geosid, effectiveRefGeosid]) {
-      const c = cmaOfTract(g);
-      if (c && index[c]) wanted.add(c);
-    }
-    const byYear = ctFeaturesRef.current;
-    if (!byYear.has(year)) byYear.set(year, new Map());
-    while (byYear.size > CT_YEARS_KEPT) byYear.delete(byYear.keys().next().value);
-    const store = byYear.get(year);
-    await Promise.all([...wanted].filter((c) => !store.has(c)).map(async (c) => {
-      const r = await apiFetch(`${API_BASE}/api/topology?year=${year}&ct_cma=${c}&v=${DATA_LAST_UPDATED}`);
+    const index = await getPartIndex(year, level);
+    if (cancelled || !Object.keys(index).length) return; // level in the base bundle
+    const sets = partFeaturesRef.current;
+    const setKey = `${year}|${level}`;
+    if (!sets.has(setKey)) sets.set(setKey, new Map());
+    while (sets.size > PART_SETS_KEPT) sets.delete(sets.keys().next().value);
+    const store = sets.get(setKey);
+    const load = (keys) => Promise.all([...keys].filter((k) => !store.has(k)).map(async (k) => {
+      const r = await apiFetch(`${API_BASE}/api/topology?year=${year}&level=${level}&part=${encodeURIComponent(k)}&v=${DATA_LAST_UPDATED}`);
       if (!r.ok) return;
       const topo = await r.json();
-      store.set(c, topojson.feature(topo, topo.objects.ct).features);
+      store.set(k, topojson.feature(topo, topo.objects[objName]).features);
     }));
+    const publish = () => {
+      const key = `${objName}${store.size}`;
+      setGeometryPayload((prev) =>
+        prev && prev.level === level && prev.year === year && prev.key === key
+          ? prev
+          : { fc: { type: "FeatureCollection", features: [...store.values()].flat() }, level, year, key });
+    };
+    const selected = [state.geosid, effectiveRefGeosid].map((g) => partOf(level, g)).filter((k) => k && index[k]);
+    // At start-up the map still shows its national view and is about to zoom
+    // to the selected geography: load only that geography's part until the
+    // zoom is settled (the zoom's moveend, or handleSelectionSettled when it
+    // doesn't move, re-runs this effect), rather than every part the national
+    // view touches.
+    if (viewport?.initial && selected.length) {
+      await load(selected);
+      if (!cancelled) publish();
+      return;
+    }
+    const inView = Object.keys(index).filter((k) => viewport && bboxesIntersect(index[k], viewport.bounds));
+    await load(new Set([...selected, ...inView]));
     if (cancelled) return;
-    const key = `ct${store.size}`;
-    setGeometryPayload((prev) =>
-      prev && prev.level === CT_LEVEL && prev.year === year && prev.key === key
-        ? prev
-        : { fc: { type: "FeatureCollection", features: [...store.values()].flat() }, level: CT_LEVEL, year, key });
-  })().catch((err) => console.error("[ct] tract loading failed:", err));
+    publish();
+  })().catch((err) => console.error("[geometry] area loading failed:", err));
   return () => { cancelled = true; };
 }, [state.level, state.year, state.geosid, levelFor, effectiveRefGeosid, viewport]);
 
@@ -1333,10 +1365,10 @@ const ncRows = useMemo(() => {
       value: mapView.values.get(String(p.geosid)) ?? null,
     };
   });
-  // Tracts load per CMA, so the layer can hold only some of them: the
-  // histogram still covers every tract with a value (a tract's name is its
-  // number, so the id stands in for one not loaded yet).
-  if (mapView.level === CT_LEVEL) {
+  // Split levels load by area, so the layer can hold only some units: the
+  // histogram still covers every unit with a value (the id stands in for the
+  // name of one not loaded yet; a tract's name is its number anyway).
+  if (SPLIT_LEVELS.has(mapView.level)) {
     const have = new Set(rows.map((r) => String(r.geosid)));
     for (const [geosid, value] of mapView.values) {
       if (!have.has(String(geosid))) {
@@ -2146,7 +2178,8 @@ useEffect(() => {
             ref={helpLegendRef}
             geometry={mapView?.geometry ?? null}
             geometryKey={mapView?.geometryKey ?? ""}
-            onViewportChange={setViewport}
+            onViewportChange={handleViewport}
+            onSelectionSettled={handleSelectionSettled}
             values={mapView?.values ?? null}
             level={mapView?.level ?? null}
             year={mapView?.year ?? null}

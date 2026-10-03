@@ -23,7 +23,7 @@ import { DuckDBInstance } from "@duckdb/node-api";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { splitByCma } from "./topology-split.mjs";
+import { splitTopology } from "./topology-split.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const arg = (name, dflt) => {
@@ -59,9 +59,10 @@ const q = (s) => `'${s.replaceAll("'", "''")}'`;
 // the same build with the same layout land in the same directory, and a
 // layout change never reuses a URL a browser may hold in its cache.
 // Bump LAYOUT whenever the files' names or contents change for the same DB.
-const LAYOUT = 5; // 2: one fact file per level; 3: small files + facts_index.json;
+const LAYOUT = 6; // 2: one fact file per level; 3: small files + facts_index.json;
                   // 4: + themeYears in the index, fact_schema in the manifest;
-                  // 5: census tract boundaries split out per CMA
+                  // 5: census tract boundaries split out per CMA;
+                  // 6: CSD and CD boundaries split out per province too (manifest .parts)
 const mtime = fs.statSync(DB).mtime;
 const version = `v${mtime.toISOString().slice(0, 19).replace(/[-:T]/g, "")}-l${LAYOUT}-r${MAX_ROWS_PER_FILE}`;
 const VDIR = path.join(OUT, version);
@@ -211,30 +212,35 @@ for (const [src, dst] of [["geos_v3.json", "geos.json"], ["themes.json", "themes
 }
 
 // TopoJSON bundles, renamed to .json so GitHub Pages serves them gzipped.
-// Census tracts are split out per CMA (topology-split.mjs): the base file of
-// a year holds every other level, and the map loads tract files only for the
-// CMAs in view. manifest.topology[year].ct[cmauid] = { file, bytes, bbox }.
+// The fine levels are split out by area (topology-split.mjs): census tracts
+// per CMA, CSDs and CDs per province. A year's base file keeps the rest
+// (provinces, CMAs), and the map loads parts only for the area in view.
+// manifest.topology[year] = { file, bytes, parts: { level: { key: { file, bytes, bbox } } } }
 const topoDir = path.join(SRC, "topology_v3");
-let ctFiles = 0;
+const partFiles = {};
 for (const f of fs.readdirSync(topoDir).filter((f) => /^topology_\d{4}\.topojson$/.test(f)).sort()) {
   const year = f.match(/\d{4}/)[0];
-  const { base, ct } = splitByCma(JSON.parse(fs.readFileSync(path.join(topoDir, f), "utf8")));
+  const { base, parts } = splitTopology(JSON.parse(fs.readFileSync(path.join(topoDir, f), "utf8")));
   const file = `topology/topology_${year}.json`;
   fs.writeFileSync(path.join(VDIR, file), JSON.stringify(base));
-  const entry = { file, bytes: fs.statSync(path.join(VDIR, file)).size, ct: {} };
-  if (Object.keys(ct).length) fs.mkdirSync(path.join(VDIR, "topology", "ct", year), { recursive: true });
-  for (const [cma, topo] of Object.entries(ct)) {
-    const ctFile = `topology/ct/${year}/${cma}.json`;
-    fs.writeFileSync(path.join(VDIR, ctFile), JSON.stringify(topo));
-    entry.ct[cma] = { file: ctFile, bytes: fs.statSync(path.join(VDIR, ctFile)).size, bbox: topo.bbox };
-    ctFiles++;
+  const entry = { file, bytes: fs.statSync(path.join(VDIR, file)).size, parts: {} };
+  for (const [level, byKey] of Object.entries(parts)) {
+    fs.mkdirSync(path.join(VDIR, "topology", level, year), { recursive: true });
+    entry.parts[level] = {};
+    for (const [key, topo] of Object.entries(byKey)) {
+      const partFile = `topology/${level}/${year}/${key}.json`;
+      fs.writeFileSync(path.join(VDIR, partFile), JSON.stringify(topo));
+      entry.parts[level][key] = { file: partFile, bytes: fs.statSync(path.join(VDIR, partFile)).size, bbox: topo.bbox };
+      partFiles[level] = (partFiles[level] ?? 0) + 1;
+    }
   }
   manifest.topology[year] = entry;
 }
-console.log(`topology: ${Object.keys(manifest.topology).length} base bundles, ${ctFiles} CT files (per CMA)`);
+console.log(`topology: ${Object.keys(manifest.topology).length} base bundles; parts ${
+  Object.entries(partFiles).map(([l, n]) => `${l} ${n}`).join(", ")}`);
 
 fs.writeFileSync(path.join(OUT, "manifest.json"), JSON.stringify(manifest, null, 2));
 const total = [...Object.values(manifest.facts).flat(), ...Object.values(manifest.tables),
-  ...Object.values(manifest.topology).flatMap((t) => [t, ...Object.values(t.ct ?? {})])]
+  ...Object.values(manifest.topology).flatMap((t) => [t, ...Object.values(t.parts ?? {}).flatMap((p) => Object.values(p))])]
   .reduce((s, f) => s + f.bytes, 0);
 console.log(`manifest.json written; ${(total / 1e6).toFixed(0)} MB under ${version}/`);
