@@ -21,40 +21,64 @@ const lit = (s) => `'${String(s).replaceAll("'", "''")}'`;
 export const FACT_TABLES = ["ct", "csd", "cd", "cma", "pr"];
 
 /** CREATE VIEW for one fact table over some of its files (default: all).
- *  Binding a view reads each listed file's footer. */
+ *  Binding a view reads each listed file's footer. With no files it reads
+ *  the empty table (see baseTableStatements): no query can match a row. */
 export function factViewSql(manifest, level, src, fileIdxs = manifest.facts[level].map((_, i) => i)) {
+  if (!fileIdxs.length) return `CREATE OR REPLACE VIEW ${level} AS SELECT * FROM empty_facts`;
   const list = fileIdxs.map((i) => lit(src(manifest.facts[level][i].file))).join(", ");
   return `CREATE OR REPLACE VIEW ${level} AS SELECT * FROM read_parquet([${list}])`;
 }
 
-/** Files of a level holding any t_code or t_theme among a query's string
- *  params, or every file when none match (always correct, just slower). A
- *  param that only looks like a code (a level name, say) widens the set,
- *  never narrows it. */
-export function filesForParams(levelIndex, fileCount, params) {
+/** The params a query binds after `<column> = ?`, by placeholder position
+ *  (the route SQL has no "?" inside string literals). */
+function paramsAfter(column, sql, params) {
+  const before = sql.split("?").slice(0, -1); // text preceding each placeholder
+  const re = new RegExp(`\\b${column}\\s*=\\s*$`, "i");
+  return params.filter((_, i) => re.test(before[i] ?? ""));
+}
+
+/** Files of a level a query needs, from the variables (`t_code = ?`) and
+ *  themes (`t_theme = ?`) it filters on: every fact query in routes.js has
+ *  at least one. A theme narrows to the census years it is filtered on
+ *  (`time = ?`, themeYears) when that theme has them: variables are mostly
+ *  per year, so a large theme opens a few files instead of all of them.
+ *  Returns [] when none of those variables or themes exist at this level
+ *  (the query cannot match a row), and every file for a query with no such
+ *  filter, which is always correct, just slow. */
+export function filesForQuery(levelIndex, fileCount, sql, params) {
+  const codes = paramsAfter("t_code", sql, params);
+  const themes = paramsAfter("t_theme", sql, params);
+  if (!levelIndex || (!codes.length && !themes.length)) return [...Array(fileCount).keys()];
+  const years = paramsAfter("time", sql, params).map(String);
   const files = new Set();
-  for (const p of params) {
-    if (typeof p !== "string") continue;
-    for (const i of levelIndex?.codes[p] ?? []) files.add(i);
-    for (const i of levelIndex?.themes[p] ?? []) files.add(i);
+  const add = (list) => { for (const i of list ?? []) files.add(i); };
+  for (const c of codes) add(levelIndex.codes[c]);
+  for (const t of themes) {
+    const byYear = levelIndex.themeYears?.[t];
+    const matched = years.filter((y) => byYear?.[y]);
+    if (matched.length) matched.forEach((y) => add(byYear[y]));
+    else if (!years.length) add(levelIndex.themes[t]);
   }
-  return files.size ? [...files].sort((a, b) => a - b) : [...Array(fileCount).keys()];
+  return [...files].sort((a, b) => a - b);
 }
 
 /** Router for fact queries: call `route(sql, params)` right before running a
  *  query; it repoints each fact view the query reads at the files it needs
- *  (via `exec(sql)`), skipping views already pointing there. Queries must
- *  not run concurrently with a route() call (both engines serialize them).
- *  On a GitHub Pages cache miss the CDN fetches a whole file before
- *  answering, so touching 1-2 small files instead of a level's 27 is what
- *  keeps a cold first query fast. */
-export function createFactRouter(manifest, index, src, exec) {
+ *  (`prepare(fileNames)` first, e.g. to register them, then `exec(sql)`),
+ *  skipping views already pointing there. Queries must not run concurrently
+ *  with a route() call (both engines serialize them). On a GitHub Pages
+ *  cache miss the CDN fetches a whole file before answering, and DuckDB-WASM
+ *  reads these files whole, so opening one or two small files instead of a
+ *  level's hundred is what keeps queries fast. */
+export function createFactRouter(manifest, index, src, exec, prepare = async () => {}) {
   const current = {}; // level → file set the view points at ("0,4")
   return async function route(sql, params = []) {
     for (const level of factTablesIn(sql)) {
-      const files = filesForParams(index?.[level], manifest.facts[level].length, params);
+      let files = filesForQuery(index?.[level], manifest.facts[level].length, sql, params);
+      if (!files.length && !manifest.fact_schema) files = manifest.facts[level].map((_, i) => i);
       const key = files.join(",");
       if (current[level] === key) continue;
+      await prepare(files.map((i) => manifest.facts[level][i].file)); // e.g. register them
       await exec(factViewSql(manifest, level, src, files));
       current[level] = key;
     }
@@ -69,8 +93,14 @@ export function factTablesIn(sql) {
 /** In-memory tables, created at start-up. */
 export function baseTableStatements(manifest, src) {
   // all_descr keeps the server's row order: routes order codes by rowid.
-  return [`CREATE OR REPLACE TABLE all_descr AS
+  const out = [`CREATE OR REPLACE TABLE all_descr AS
     SELECT * EXCLUDE (rid) FROM read_parquet(${lit(src(manifest.tables.all_descr.file))}) ORDER BY rid`];
+  // A fact table with no rows, for queries on variables a level doesn't have.
+  if (manifest.fact_schema) {
+    const cols = manifest.fact_schema.map(([name, type]) => `"${name}" ${type}`).join(", ");
+    out.push(`CREATE OR REPLACE TABLE empty_facts (${cols})`);
+  }
+  return out;
 }
 
 /** Every view over all files, plus the base tables (Node tools). */

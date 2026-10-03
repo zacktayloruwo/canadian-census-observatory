@@ -126,6 +126,10 @@ const fixed = [
   "/api/geometry?level=3&year=1911", "/api/geometry?level=4&year=2021",
   "/api/geo-polygon?geosid=35&year=2021", "/api/geo-polygon?geosid=4611040&year=1966",
   "/api/values?level=1&year=2021&t_code=dnk2",
+  // variables a level doesn't have: the router reads an empty table
+  "/api/values?level=2&year=2021&t_code=nope", "/api/nc-ref-value?geosid=35&year=2021&t_code=nope",
+  "/api/series?focal_geosid=3506008&ref_geosid=35&year=2021&t_code=nope",
+  "/api/cs-plot?level=2&year=2021&t_theme=dwpr&geosid=3506008&ref_geosid=35",
 ];
 for (const u of fixed) await check(u);
 

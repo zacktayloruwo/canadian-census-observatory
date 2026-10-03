@@ -58,7 +58,8 @@ const q = (s) => `'${s.replaceAll("'", "''")}'`;
 // the same build with the same layout land in the same directory, and a
 // layout change never reuses a URL a browser may hold in its cache.
 // Bump LAYOUT whenever the files' names or contents change for the same DB.
-const LAYOUT = 3; // 2: one fact file per level; 3: small files + facts_index.json
+const LAYOUT = 4; // 2: one fact file per level; 3: small files + facts_index.json;
+                  // 4: + themeYears in the index, fact_schema in the manifest
 const mtime = fs.statSync(DB).mtime;
 const version = `v${mtime.toISOString().slice(0, 19).replace(/[-:T]/g, "")}-l${LAYOUT}-r${MAX_ROWS_PER_FILE}`;
 const VDIR = path.join(OUT, version);
@@ -133,7 +134,7 @@ for (const lvl of LEVELS) {
     ORDER BY x.t_theme NULLS LAST, x.t_code NULLS LAST, x."time", x.geosid`);
 
   manifest.facts[lvl] = [];
-  factsIndex[lvl] = { codes: {}, themes: {} };
+  factsIndex[lvl] = { codes: {}, themes: {}, themeYears: {} };
   for (let i = 0; i <= chunk; i++) {
     const file = `facts/${lvl}_${i}.parquet`;
     await run(`
@@ -146,8 +147,17 @@ for (const lvl of LEVELS) {
     if (g.t_code != null) addTo(factsIndex[lvl].codes, g.t_code, g.chunk);
     if (g.t_theme != null) addTo(factsIndex[lvl].themes, g.t_theme, g.chunk);
   }
+  // themeYears[theme][year]: files holding that theme's rows for one census
+  // year. Plot queries name a theme and a year, and variables are mostly
+  // per year, so this opens a fraction of a large theme's files.
+  for (const r of await all(`SELECT DISTINCT t_theme, "time", chunk FROM staged WHERE t_theme IS NOT NULL`)) {
+    addTo((factsIndex[lvl].themeYears[r.t_theme] ??= {}), String(r.time), r.chunk);
+  }
   const mb = manifest.facts[lvl].map((f) => f.bytes / 1e6);
   console.log(`${lvl}: ${mb.length} files, ${Math.min(...mb).toFixed(1)}-${Math.max(...mb).toFixed(1)} MB`);
+  // Column names and types of the fact files, for the browser's empty table.
+  manifest.fact_schema ??= (await all(`DESCRIBE SELECT * EXCLUDE (chunk) FROM staged`))
+    .map((r) => [r.column_name, r.column_type]);
   await run("DROP TABLE staged");
 }
 
@@ -164,10 +174,14 @@ for (const lvl of LEVELS) {
 // Plot queries select a theme's rows through all_descr (JOIN ... d.t_theme = ?),
 // so a theme must also cover the files of every code all_descr lists under
 // it at that level, whatever t_theme the fact rows themselves carry.
-for (const { level, t_theme, t_code } of await all(
-  `SELECT DISTINCT level, t_theme, t_code FROM all_descr WHERE t_theme IS NOT NULL AND t_code IS NOT NULL`
+for (const { level, time, t_theme, t_code } of await all(
+  `SELECT DISTINCT level, "time", t_theme, t_code FROM all_descr WHERE t_theme IS NOT NULL AND t_code IS NOT NULL`
 )) {
-  for (const chunk of factsIndex[level]?.codes[t_code] ?? []) addTo(factsIndex[level].themes, t_theme, chunk);
+  const idx = factsIndex[level];
+  for (const chunk of idx?.codes[t_code] ?? []) {
+    addTo(idx.themes, t_theme, chunk);
+    if (time != null) addTo((idx.themeYears[t_theme] ??= {}), String(time), chunk);
+  }
 }
 fs.writeFileSync(path.join(VDIR, "facts_index.json"), JSON.stringify(factsIndex));
 manifest.tables.facts_index = { file: "facts_index.json", bytes: fs.statSync(path.join(VDIR, "facts_index.json")).size };

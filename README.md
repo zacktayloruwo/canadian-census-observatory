@@ -28,7 +28,13 @@ React app ──fetch("/api/…")──► data/apiFetch.js ──► data/route
   The components only changed `fetch(` → `apiFetch(`.
 - **`frontend/src/data/engine.js`** — starts DuckDB-WASM and loads the lookups
   in parallel. Before each query, the router in `schema.js` points the fact
-  view at only the files holding that query's variables (`facts_index.json`).
+  view at only the files holding that query's variables (`facts_index.json`),
+  found from its `t_code = ?` / `t_theme = ?` / `time = ?` placeholders; a
+  variable the level doesn't have reads an empty table instead of every file.
+  Files are registered with DuckDB on first use. Parquet is read whole, one
+  request per file (see the comment in `engine.js` for the measurements).
+- **`tools/rowgroup-stats.mjs`** — how many row groups each query shape can
+  skip via min/max statistics in an export.
 - **`tools/export-data.mjs`** — turns the server's `observatory_v3.duckdb` and
   its sidecars into `frontend/public/data/` (manifest + one versioned
   directory). Fact tables keep only the 9 columns the app reads, are sorted by

@@ -78,8 +78,16 @@ async function start() {
   const indexReady = manifest.tables.facts_index
     ? fetch(urlOf(manifest.tables.facts_index.file)).then((r) => r.json()).catch(() => null)
     : Promise.resolve(null);
-  const routerReady = Promise.all([connReady, indexReady]).then(([conn, index]) =>
-    createFactRouter(manifest, index, regName, (sql) => conn.query(sql)));
+  // Fact files are registered with DuckDB on first use (prepare), not at
+  // start-up: there are hundreds, and a query needs one or two.
+  const registered = new Set();
+  const routerReady = Promise.all([connReady, indexReady]).then(([{ db, conn }, index]) =>
+    createFactRouter(manifest, index, regName, (sql) => conn.query(sql), async (files) => {
+      for (const file of files.filter((f) => !registered.has(f))) {
+        await db.registerFileURL(regName(file), urlOf(file), duckdb.DuckDBDataProtocol.HTTP, false);
+        registered.add(file);
+      }
+    }));
   connReady.catch(() => { apiPromise = null; }); // let the next call retry
 
   // One connection, one query at a time: the worker executes serially anyway,
@@ -88,7 +96,7 @@ async function start() {
   let firstFact = false;
   const duckAll = (sql, params = []) => {
     const run = async () => {
-      const conn = await connReady;
+      const { conn } = await connReady;
       const route = await routerReady;
       const q0 = performance.now();
       await route(sql, params); // point the fact views at this query's files
@@ -167,10 +175,8 @@ async function startDuckDB(manifest, urlOf, mark) {
   // reads ({ reliableHeadRequests: false, allowFullHTTPReads: true,
   // forceFullHTTPReads: false } via db.open) ~25-30 sequential requests, first
   // data 5.0-5.6 s. Revisit only if the files get much larger.
-  const parquet = [
-    ...Object.values(manifest.facts).flat(),
-    ...Object.values(manifest.tables).filter((t) => t.file.endsWith(".parquet")),
-  ];
+  // Only the small tables here; fact files are registered on first use.
+  const parquet = Object.values(manifest.tables).filter((t) => t.file.endsWith(".parquet"));
   await Promise.all(parquet.map((f) =>
     db.registerFileURL(regName(f.file), urlOf(f.file), duckdb.DuckDBDataProtocol.HTTP, false)));
   mark("register");
@@ -185,5 +191,5 @@ async function startDuckDB(manifest, urlOf, mark) {
   mark("settings");
   for (const sql of baseTableStatements(manifest, regName)) await conn.query(sql);
   mark("duckdb");
-  return conn;
+  return { db, conn };
 }
