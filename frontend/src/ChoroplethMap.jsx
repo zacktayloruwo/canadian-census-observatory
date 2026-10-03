@@ -881,6 +881,14 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
         center={defaultCenter}
         zoom={defaultZoom}
         minZoom={defMinZoom}
+        // Continuous wheel / pinch zoom: no snapping to whole zoom levels, and
+        // a finer wheel step with a short debounce, so the map follows the
+        // wheel or trackpad instead of jumping a level per notch. The +/−
+        // buttons still step by one level.
+        zoomSnap={0}
+        zoomDelta={1}
+        wheelPxPerZoomLevel={90}
+        wheelDebounceTime={20}
         // Canvas renderer: one canvas per pane instead of ~5k SVG DOM nodes —
         // much faster mount/pan/zoom on CSD/CT layers. Requires the
         // CanvasPattern no-data fill above (SVG url() fills don't work here).

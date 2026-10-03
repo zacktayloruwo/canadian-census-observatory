@@ -1,6 +1,6 @@
 // DataLoadingIndicator.jsx
 //
-// "Loading…" pill shown over the map while data requests are in flight —
+// "Loading…" pill shown in the centre of the map while data requests are in flight —
 // the first queries after start-up wait on DuckDB-WASM opening the Parquet
 // files over the network, which can take seconds. Appears only once requests
 // have been pending for a moment (see pendingRequests in data/apiFetch.js),
@@ -21,9 +21,9 @@ export default function DataLoadingIndicator() {
       aria-live="polite"
       style={{
         position: "absolute",
-        top: 10,
+        top: "50%",
         left: "50%",
-        transform: "translateX(-50%)",
+        transform: "translate(-50%, -50%)",
         zIndex: 1000,
         pointerEvents: "none",
         display: visible ? "flex" : "none",
