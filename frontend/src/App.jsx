@@ -1021,6 +1021,36 @@ function expandTopologyLevel(topo, level) {
   return topojson.feature(topo, topo.objects[objName]);
 }
 
+// --- Census tracts, loaded per CMA ---------------------------------------------
+// Tract boundaries ship as one small TopoJSON file per CMA and census year
+// (tools/topology-split.mjs); the year's base bundle holds every other level.
+// At the tract level the map loads the CMAs whose extent intersects the view,
+// plus the CMAs of the selected tracts, and more as the user pans. A year's
+// index ({ cmauid: [w, s, e, n] }) is empty for data built before the split,
+// whose base bundle still carries the tracts (the generic path below).
+const [viewport, setViewport] = useState(null);                // [w, s, e, n], from the map
+const ctIndexRef = useRef(new Map());                          // year → Promise<{ cmauid: bbox }>
+const ctFeaturesRef = useRef(new Map());                       // year → Map<cmauid, Feature[]>
+const CT_YEARS_KEPT = 3;
+
+function getCtIndex(year) {
+  const cache = ctIndexRef.current;
+  if (!cache.has(year)) {
+    cache.set(year, apiFetch(`${API_BASE}/api/ct-index?year=${year}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d?.cmas ?? {})
+      .catch(() => {
+        cache.delete(year); // retry next time
+        return {};
+      }));
+  }
+  return cache.get(year);
+}
+
+const bboxesIntersect = (a, b) => a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3];
+// Tract ids carry a decimal part (5350001.00); their first three digits are the CMA.
+const cmaOfTract = (geosid) => (geosid && String(geosid).includes(".") ? String(geosid).slice(0, 3) : null);
+
 // CT → CMA name for the whole level, fetched once per year while tracts are
 // showing. The map's polygons come from the static per-year TopoJSON bundles,
 // whose feature properties carry prname only, so the metro names cannot ride
@@ -1085,6 +1115,11 @@ useEffect(() => {
         setGeometryPayload({ fc, level: state.level, year: state.year });
       };
 
+      // Tracts split per CMA: the loader effect below builds the tract layer;
+      // here only the base bundle is fetched, for the province overlay.
+      const perCmaTracts = state.level === CT_LEVEL
+        && Object.keys(await getCtIndex(state.year)).length > 0;
+
       // 1) Preferred path: the year's TopoJSON bundle (all levels, shared arcs).
       const topoCache = topologyCacheRef.current;
       let topo = topoCache.get(state.year);
@@ -1109,6 +1144,7 @@ useEffect(() => {
           topoCache.delete(topoCache.keys().next().value);
         }
       }
+      if (perCmaTracts) return;
       if (topo) {
         const fc = expandTopologyLevel(topo, state.level);
         if (fc) {
@@ -1149,8 +1185,45 @@ const provincesFC = useMemo(() => {
   // resolution is the signal that the year's bundle (or its absence) is known.
 }, [state.year, geometryPayload]);
 
+// Tract loader: fetch the per-CMA tract files the view (and the selected
+// tracts) need, then publish every tract loaded so far for the year as the
+// layer. Its key changes with the number of CMAs loaded, so the map remounts
+// the layer when more arrive.
 useEffect(() => {
-  if (!state.level || !state.year || !state.t_code) {
+  if (state.level !== CT_LEVEL || !state.year) return;
+  if (state.geosid && levelFor !== state.geosid) return;
+  const year = state.year;
+  let cancelled = false;
+  (async () => {
+    const index = await getCtIndex(year);
+    if (cancelled || !Object.keys(index).length) return; // tracts in the base bundle
+    const wanted = new Set(Object.keys(index).filter((c) => viewport && bboxesIntersect(index[c], viewport)));
+    for (const g of [state.geosid, effectiveRefGeosid]) {
+      const c = cmaOfTract(g);
+      if (c && index[c]) wanted.add(c);
+    }
+    const byYear = ctFeaturesRef.current;
+    if (!byYear.has(year)) byYear.set(year, new Map());
+    while (byYear.size > CT_YEARS_KEPT) byYear.delete(byYear.keys().next().value);
+    const store = byYear.get(year);
+    await Promise.all([...wanted].filter((c) => !store.has(c)).map(async (c) => {
+      const r = await apiFetch(`${API_BASE}/api/topology?year=${year}&ct_cma=${c}&v=${DATA_LAST_UPDATED}`);
+      if (!r.ok) return;
+      const topo = await r.json();
+      store.set(c, topojson.feature(topo, topo.objects.ct).features);
+    }));
+    if (cancelled) return;
+    const key = `ct${store.size}`;
+    setGeometryPayload((prev) =>
+      prev && prev.level === CT_LEVEL && prev.year === year && prev.key === key
+        ? prev
+        : { fc: { type: "FeatureCollection", features: [...store.values()].flat() }, level: CT_LEVEL, year, key });
+  })().catch((err) => console.error("[ct] tract loading failed:", err));
+  return () => { cancelled = true; };
+}, [state.level, state.year, state.geosid, levelFor, effectiveRefGeosid, viewport]);
+
+useEffect(() => {
+  if (!state.level || !state.t_code || !state.year) {
     setValuesPayload(null);
     return;
   }
@@ -1237,6 +1310,7 @@ const mapView = useMemo(() => {
   ) {
     mapViewRef.current = {
       geometry: geometryPayload.fc,
+      geometryKey: geometryPayload.key ?? "",
       values: displayValues,
       level: geometryPayload.level,
       year: geometryPayload.year,
@@ -1250,7 +1324,7 @@ const mapView = useMemo(() => {
 // histogram stays consistent with what the map shows during transitions.
 const ncRows = useMemo(() => {
   if (!mapView) return null;
-  return mapView.geometry.features.map((f) => {
+  const rows = mapView.geometry.features.map((f) => {
     const p = f.properties || {};
     return {
       geosid: p.geosid,
@@ -1259,6 +1333,18 @@ const ncRows = useMemo(() => {
       value: mapView.values.get(String(p.geosid)) ?? null,
     };
   });
+  // Tracts load per CMA, so the layer can hold only some of them: the
+  // histogram still covers every tract with a value (a tract's name is its
+  // number, so the id stands in for one not loaded yet).
+  if (mapView.level === CT_LEVEL) {
+    const have = new Set(rows.map((r) => String(r.geosid)));
+    for (const [geosid, value] of mapView.values) {
+      if (!have.has(String(geosid))) {
+        rows.push({ geosid, geoname: String(geosid), prname: ctCmaNames?.[String(geosid)] ?? null, value });
+      }
+    }
+  }
+  return rows;
 }, [mapView, ctCmaNames]);
 
 useEffect(() => {
@@ -2059,6 +2145,8 @@ useEffect(() => {
           <ChoroplethMap
             ref={helpLegendRef}
             geometry={mapView?.geometry ?? null}
+            geometryKey={mapView?.geometryKey ?? ""}
+            onViewportChange={setViewport}
             values={mapView?.values ?? null}
             level={mapView?.level ?? null}
             year={mapView?.year ?? null}

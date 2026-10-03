@@ -21,12 +21,14 @@
 // createApi({ duckAll, readJson, readTopology, log? }) → { handle(path, query) }
 //   duckAll(sql, params)  → Promise<row objects>, numbers not BigInts
 //   readJson(name)        → Promise<parsed JSON: geos | themes | hlook | lineage>
-//   readTopology(year)    → Promise<topology object | null>
+//   readTopology(year, cma?) → Promise<topology object | null>; with a cma,
+//                           that CMA's census-tract bundle
+//   ctCmas(year)          → { cmauid: { bbox } } tract bundles of a year ({} if none)
 //   handle(...)           → Promise<{ status, body }>
 
 import { feature as topoFeature } from "topojson-client";
 
-export async function createApi({ duckAll, readJson, readTopology, log = () => {} }) {
+export async function createApi({ duckAll, readJson, readTopology, ctCmas = () => ({}), log = () => {} }) {
   // ── Express-shaped shim ────────────────────────────────────────────────────
   const ROUTES = new Map();
   const app = { get: (p, h) => ROUTES.set(p, h) };
@@ -643,33 +645,63 @@ export async function createApi({ duckAll, readJson, readTopology, log = () => {
   // WKB in the geoms table. The per-year bundles carry the same features
   // (same pipeline output, properties geosid/geoname/prname + flags), so the
   // static version cuts all three from the bundle.
-  const TOPOLOGY_CACHE = new Map(); // year → Promise<topology | null>
-  function getTopology(year) {
-    if (!TOPOLOGY_CACHE.has(year)) {
-      const p = readTopology(year).catch((err) => {
-        TOPOLOGY_CACHE.delete(year); // don't cache transient failures
+  //
+  // Census tracts are split out per CMA (tools/topology-split.mjs): the
+  // year's base bundle holds the other levels, and ctCmas(year) lists the
+  // per-CMA tract bundles ({ cmauid: { bbox } }) read by readTopology(year,
+  // cmauid). Data built before the split has tracts in the base bundle;
+  // ctCmas() is then empty and everything reads the base bundle as before.
+  const TOPOLOGY_CACHE = new Map(); // "year" | "year|cma" → Promise<topology | null>
+  function getTopology(year, cma = null) {
+    const key = cma ? `${year}|${cma}` : String(year);
+    if (!TOPOLOGY_CACHE.has(key)) {
+      const p = readTopology(year, cma).catch((err) => {
+        TOPOLOGY_CACHE.delete(key); // don't cache transient failures
         throw err;
       });
-      TOPOLOGY_CACHE.set(year, p);
-      while (TOPOLOGY_CACHE.size > 4) TOPOLOGY_CACHE.delete(TOPOLOGY_CACHE.keys().next().value);
+      TOPOLOGY_CACHE.set(key, p);
+      // Base bundles are MB-sized; tract bundles small and numerous.
+      while (TOPOLOGY_CACHE.size > 120) TOPOLOGY_CACHE.delete(TOPOLOGY_CACHE.keys().next().value);
     }
-    return TOPOLOGY_CACHE.get(year);
+    return TOPOLOGY_CACHE.get(key);
   }
+  const cmaOfTract = (geosid) => String(geosid).slice(0, 3);
 
   async function levelCollection(levelNum, year) {
+    const cmas = Object.keys(ctCmas(year));
+    if (LEVEL_CODE[levelNum] === "ct" && cmas.length) {
+      const parts = await Promise.all(cmas.map((cma) => getTopology(year, cma)));
+      return { type: "FeatureCollection",
+               features: parts.flatMap((t) => (t ? topoFeature(t, t.objects.ct).features : [])) };
+    }
     const topo = await getTopology(year);
     const obj = topo?.objects?.[LEVEL_CODE[levelNum]];
     if (!obj) return { type: "FeatureCollection", features: [] };
     return topoFeature(topo, obj);
   }
 
-  // GET /api/topology?year=2021
+  // GET /api/ct-index?year=2021 → { year, cmas: { cmauid: [w, s, e, n] } }
+  // The per-CMA tract bundles of a year and their extents, so the map can
+  // load tracts for the CMAs in view. Empty when tracts are in the base bundle.
+  app.get("/api/ct-index", (req, res) => {
+    const year = req.query.year ? Number(req.query.year) : null;
+    if (!year || Number.isNaN(year)) {
+      return res.status(400).json({ error: "year is required and must be a number" });
+    }
+    const cmas = Object.fromEntries(Object.entries(ctCmas(year)).map(([cma, v]) => [cma, v.bbox]));
+    res.json({ year, cmas });
+  });
+
+  // GET /api/topology?year=2021            the year's base bundle
+  // GET /api/topology?year=2021&ct_cma=535 one CMA's census tracts
   app.get("/api/topology", (req, res) => {
     const year = req.query.year ? Number(req.query.year) : null;
     if (!year || Number.isNaN(year)) {
       return res.status(400).json({ error: "year is required and must be a number" });
     }
-    getTopology(year)
+    const cma = req.query.ct_cma ? String(req.query.ct_cma) : null;
+    if (cma && !ctCmas(year)[cma]) return res.status(404).json({ error: "no tract bundle for this CMA and year" });
+    getTopology(year, cma)
       .then((topo) => topo
         ? res.json(topo)
         : res.status(404).json({ error: "no topology bundle for this year" }))
@@ -718,16 +750,21 @@ export async function createApi({ duckAll, readJson, readTopology, log = () => {
     }
 
     try {
-      const topo = await getTopology(resolvedYear);
-      for (const obj of Object.values(topo?.objects ?? {})) {
-        const geom = obj.geometries?.find((g) => String(g.properties?.geosid) === geosid);
-        if (!geom) continue;
-        const meta = getGeoMeta(resolvedYear, geosid);
-        return res.json({
-          type: "Feature",
-          properties: { geosid, geoname: meta?.geoname ?? null },
-          geometry: topoFeature(topo, geom).geometry,
-        });
+      // The base bundle first, then (for a tract) its CMA's tract bundle.
+      const cma = cmaOfTract(geosid);
+      const sources = [await getTopology(resolvedYear)];
+      if (ctCmas(resolvedYear)[cma]) sources.push(await getTopology(resolvedYear, cma));
+      for (const topo of sources) {
+        for (const obj of Object.values(topo?.objects ?? {})) {
+          const geom = obj.geometries?.find((g) => String(g.properties?.geosid) === geosid);
+          if (!geom) continue;
+          const meta = getGeoMeta(resolvedYear, geosid);
+          return res.json({
+            type: "Feature",
+            properties: { geosid, geoname: meta?.geoname ?? null },
+            geometry: topoFeature(topo, geom).geometry,
+          });
+        }
       }
       return res.status(404).json({ error: "not found" });
     } catch (err) {

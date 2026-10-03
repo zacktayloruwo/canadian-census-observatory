@@ -23,6 +23,7 @@ import { DuckDBInstance } from "@duckdb/node-api";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { splitByCma } from "./topology-split.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const arg = (name, dflt) => {
@@ -58,8 +59,9 @@ const q = (s) => `'${s.replaceAll("'", "''")}'`;
 // the same build with the same layout land in the same directory, and a
 // layout change never reuses a URL a browser may hold in its cache.
 // Bump LAYOUT whenever the files' names or contents change for the same DB.
-const LAYOUT = 4; // 2: one fact file per level; 3: small files + facts_index.json;
-                  // 4: + themeYears in the index, fact_schema in the manifest
+const LAYOUT = 5; // 2: one fact file per level; 3: small files + facts_index.json;
+                  // 4: + themeYears in the index, fact_schema in the manifest;
+                  // 5: census tract boundaries split out per CMA
 const mtime = fs.statSync(DB).mtime;
 const version = `v${mtime.toISOString().slice(0, 19).replace(/[-:T]/g, "")}-l${LAYOUT}-r${MAX_ROWS_PER_FILE}`;
 const VDIR = path.join(OUT, version);
@@ -208,17 +210,31 @@ for (const [src, dst] of [["geos_v3.json", "geos.json"], ["themes.json", "themes
   manifest.tables[dst.replace(".json", "")] = { file: dst, bytes: fs.statSync(path.join(VDIR, dst)).size };
 }
 
-// TopoJSON bundles. Renamed to .json so GitHub Pages serves them gzipped.
+// TopoJSON bundles, renamed to .json so GitHub Pages serves them gzipped.
+// Census tracts are split out per CMA (topology-split.mjs): the base file of
+// a year holds every other level, and the map loads tract files only for the
+// CMAs in view. manifest.topology[year].ct[cmauid] = { file, bytes, bbox }.
 const topoDir = path.join(SRC, "topology_v3");
+let ctFiles = 0;
 for (const f of fs.readdirSync(topoDir).filter((f) => /^topology_\d{4}\.topojson$/.test(f)).sort()) {
   const year = f.match(/\d{4}/)[0];
+  const { base, ct } = splitByCma(JSON.parse(fs.readFileSync(path.join(topoDir, f), "utf8")));
   const file = `topology/topology_${year}.json`;
-  fs.copyFileSync(path.join(topoDir, f), path.join(VDIR, file));
-  manifest.topology[year] = { file, bytes: fs.statSync(path.join(VDIR, file)).size };
+  fs.writeFileSync(path.join(VDIR, file), JSON.stringify(base));
+  const entry = { file, bytes: fs.statSync(path.join(VDIR, file)).size, ct: {} };
+  if (Object.keys(ct).length) fs.mkdirSync(path.join(VDIR, "topology", "ct", year), { recursive: true });
+  for (const [cma, topo] of Object.entries(ct)) {
+    const ctFile = `topology/ct/${year}/${cma}.json`;
+    fs.writeFileSync(path.join(VDIR, ctFile), JSON.stringify(topo));
+    entry.ct[cma] = { file: ctFile, bytes: fs.statSync(path.join(VDIR, ctFile)).size, bbox: topo.bbox };
+    ctFiles++;
+  }
+  manifest.topology[year] = entry;
 }
-console.log(`topology: ${Object.keys(manifest.topology).length} bundles`);
+console.log(`topology: ${Object.keys(manifest.topology).length} base bundles, ${ctFiles} CT files (per CMA)`);
 
 fs.writeFileSync(path.join(OUT, "manifest.json"), JSON.stringify(manifest, null, 2));
-const total = [...Object.values(manifest.facts).flat(), ...Object.values(manifest.tables), ...Object.values(manifest.topology)]
+const total = [...Object.values(manifest.facts).flat(), ...Object.values(manifest.tables),
+  ...Object.values(manifest.topology).flatMap((t) => [t, ...Object.values(t.ct ?? {})])]
   .reduce((s, f) => s + f.bytes, 0);
 console.log(`manifest.json written; ${(total / 1e6).toFixed(0)} MB under ${version}/`);

@@ -43,6 +43,12 @@ React app ──fetch("/api/…")──► data/apiFetch.js ──► data/route
   Small files matter on GitHub Pages: on a cache miss its CDN fetches the whole
   file before answering a range request (3.4 s for an 89 MB file, 0.2 s for
   1.7 MB), and occasionally sends the whole file instead of the range.
+- **`tools/topology-split.mjs`** — splits each year's TopoJSON bundle into a
+  base file (every level but census tracts) and one tract file per CMA, with
+  only the arcs each needs (decodes identically; checked feature by feature).
+  At the tract level the map loads the CMAs in view plus those of the
+  selected tracts (`/api/ct-index`, `/api/topology?ct_cma=`); the 2021 base
+  file drops from 10.2 to 6.4 MB for every other level.
 - **`tools/compare.mjs`** — runs `routes.js` in Node, with the same file routing, over the exported files and
   compares ~3,700 responses with the running Express server. They should all
   match, except that `/api/themes?level=4&year=2016` can differ in the order of
@@ -54,7 +60,7 @@ React app ──fetch("/api/…")──► data/apiFetch.js ──► data/route
 |---|---|
 | Fact Parquet (ct, csd, cd, cma, pr) | 191 MB in 59 files of 0.4–5.5 MB, plus a 0.5 MB index |
 | Lookups (hlook, lineage, geos, themes, all_descr) | 22 MB (JSON gzipped by Pages) |
-| TopoJSON bundles, 1851–2021 | 124 MB (gzipped by Pages) |
+| TopoJSON boundaries, 1851–2021 | 105 MB in 25 base files + 32 MB in 540 per-CMA tract files (gzipped by Pages) |
 | App + DuckDB-WASM | 37 MB (8 MB gzipped) |
 | **Built site** | **≈ 382 MB** (Pages limit: 1 GB) |
 

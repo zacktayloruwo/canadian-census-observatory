@@ -123,15 +123,17 @@ async function start() {
   };
 
   const readJson = (name) => fetch(urlOf(manifest.tables[name].file)).then((r) => r.json());
-  const readTopology = async (year) => {
-    const f = manifest.topology[year];
+  // A year's base bundle, or with a cma that CMA's census-tract bundle.
+  const readTopology = async (year, cma = null) => {
+    const f = cma ? manifest.topology[year]?.ct?.[cma] : manifest.topology[year];
     if (!f) return null;
     const r = await fetch(urlOf(f.file));
-    if (!r.ok) throw new Error(`topology ${year}: HTTP ${r.status}`);
+    if (!r.ok) throw new Error(`topology ${year}${cma ? ` ct ${cma}` : ""}: HTTP ${r.status}`);
     return r.json();
   };
+  const ctCmas = (year) => manifest.topology[year]?.ct ?? {};
 
-  const api = await createApi({ duckAll, readJson, readTopology, log: (m) => m.startsWith("startup:") && mark(m.slice(8)) });
+  const api = await createApi({ duckAll, readJson, readTopology, ctCmas, log: (m) => m.startsWith("startup:") && mark(m.slice(8)) });
   mark("lookups");
   connReady.then(() => {
     globalThis.__dataStartup = marks; // for profiling from the console

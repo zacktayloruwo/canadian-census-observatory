@@ -1,7 +1,7 @@
 // src/ChoroplethMap.jsx
 import React, { useEffect, useMemo, useRef, useState, forwardRef } from "react";
 import L from "leaflet";
-import { MapContainer, TileLayer, GeoJSON, useMap, Pane, ZoomControl } from "react-leaflet";
+import { MapContainer, TileLayer, GeoJSON, useMap, useMapEvents, Pane, ZoomControl } from "react-leaflet";
 import { useMantineColorScheme } from "@mantine/core";
 import { faCanadianMapleLeaf } from "@fortawesome/free-brands-svg-icons";
 import { faChartSimple, faFilter } from "@fortawesome/free-solid-svg-icons";
@@ -301,6 +301,21 @@ function ZoomToNational({ center, zoom }) {
   return null;
 }
 
+// --- Viewport reporter ---------------------------------------------------------
+// Reports the visible extent ([west, south, east, north]) once on mount and
+// after every pan or zoom, so App can load census tracts for the CMAs in view.
+
+function ViewportReporter({ onChange }) {
+  const map = useMap();
+  const report = () => {
+    const b = map.getBounds();
+    onChange?.([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+  };
+  useMapEvents({ moveend: report });
+  useEffect(report, [map]); // eslint-disable-line react-hooks/exhaustive-deps
+  return null;
+}
+
 // --- Zoom helper -------------------------------------------------------------
 
 function ZoomToSelected({ geojson, selectedGeosid }) {
@@ -394,6 +409,10 @@ function ZoomOnRequest({ geojson, geosid, seq, overrideGeojson }) {
 
 const ChoroplethMap = forwardRef(function ChoroplethMap({
   geometry,      // FeatureCollection — static per (level, year); properties: geosid/geoname/prname
+  // Changes when the features of a (level, year) grow: census tracts arrive
+  // per CMA as the map moves, and the layer must remount to draw them.
+  geometryKey = "",
+  onViewportChange, // ([west, south, east, north]) after each pan/zoom
   values,        // Map<geosid, displayValue> — swapped on variable/mode change, layer persists
   level,
   year,
@@ -549,9 +568,10 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
   const mapRef        = useRef(null);
   const [hoverTooltip, setHoverTooltip] = useState(null); // { html, x, y } | null
 
-  // Layer identity is the geometry identity: only a level or year change
-  // remounts the GeoJSON layer.  Variable / mode changes restyle in place.
-  const mapKey = `${level ?? "n"}-${year ?? "n"}`;
+  // Layer identity is the geometry identity: a level or year change, or more
+  // census tracts arriving, remounts the GeoJSON layer. Variable / mode
+  // changes restyle in place.
+  const mapKey = `${level ?? "n"}-${year ?? "n"}-${geometryKey}`;
 
   // Live context for event handlers bound at layer mount: handlers read the
   // current values/labels through this ref, so tooltips stay correct across
@@ -908,6 +928,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
             )}
 
             <MapInit mapRef={mapRef} />
+            <ViewportReporter onChange={onViewportChange} />
             <ZoomToNational center={defaultCenter} zoom={defaultZoom} />
             <MapBackground showBasemap={showBasemap} />
             <MapResizer layoutKey={layoutKey} />
