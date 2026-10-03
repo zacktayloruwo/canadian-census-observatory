@@ -324,9 +324,9 @@ function ZoomToSelected({ geojson, selectedGeosid }) {
   // Zoom only when the SELECTION changes, not when the geometry object does —
   // geometry gets a new identity on every (level, year) change, and refitting
   // then would yank the user's zoom/pan just for picking a different year.
-  // lastZoomedRef records which geosid we already fitted; it's only set after
-  // a successful fit, so a selection made before its geometry arrives still
-  // zooms once the features land.
+  // lastZoomedRef records which geosid we already handled; it's only set once
+  // the selection's features are on hand, so a selection made before its
+  // geometry arrives still zooms once the features land.
   const lastZoomedRef = useRef(null);
 
   useEffect(() => {
@@ -348,10 +348,17 @@ function ZoomToSelected({ geojson, selectedGeosid }) {
     const bounds = tempLayer.getBounds();
 
     if (bounds && bounds.isValid && bounds.isValid()) {
-      map.fitBounds(bounds, {
-        maxZoom: 10,
-        padding: [20, 20],
-      });
+      // Already fully on screen (typically a polygon just clicked): leave the
+      // view alone. Otherwise fit it, capping the zoom-in at level 10 or the
+      // current zoom, whichever is closer, so the cap never forces a zoom-out
+      // (it used to pull a zoomed-in map back to 10 on every click). The fit
+      // still zooms out when the polygon is too big to show at this zoom.
+      if (!map.getBounds().contains(bounds)) {
+        map.fitBounds(bounds, {
+          maxZoom: Math.max(10, map.getZoom()),
+          padding: [20, 20],
+        });
+      }
       lastZoomedRef.current = selectedGeosid;
     }
 
