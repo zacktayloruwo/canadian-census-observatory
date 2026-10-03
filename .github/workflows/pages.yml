@@ -1,0 +1,65 @@
+# Build the static app and publish it to GitHub Pages.
+#
+# The data (~345 MB of Parquet, lookups and TopoJSON) is not in git: it is a
+# GitHub Release asset (data.tar, made by tools/publish-data.sh), and
+# data-release.txt names the release this commit deploys with.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Fetch data release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -s data-release.txt || { echo "data-release.txt missing: run tools/publish-data.sh"; exit 1; }
+          tag=$(cat data-release.txt)
+          gh release download "$tag" --pattern data.tar --dir "$RUNNER_TEMP"
+          mkdir -p frontend/public/data
+          tar -xf "$RUNNER_TEMP/data.tar" -C frontend/public/data
+
+      - run: npm ci
+        working-directory: frontend
+
+      - run: npm run build
+        working-directory: frontend
+        env:
+          VITE_BASE: /${{ github.event.repository.name }}/
+          VITE_CARTO_KEY: ${{ vars.VITE_CARTO_KEY }}
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

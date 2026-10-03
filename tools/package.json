@@ -1,0 +1,13 @@
+{
+  "name": "unicen-wasm-tools",
+  "private": true,
+  "type": "module",
+  "description": "Build-time tools: export the observatory DuckDB build to static Parquet, and compare the static data layer with the Express API.",
+  "scripts": {
+    "export-data": "node export-data.mjs",
+    "compare": "node compare.mjs"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "1.5.5-r.3"
+  }
+}

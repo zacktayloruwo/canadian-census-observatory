@@ -1,0 +1,24 @@
+/* Contrast overrides that cannot be expressed as theme tokens.
+   Loaded after @mantine/core/styles.css in main.jsx.
+   (Note: src/index.css and src/App.css are Vite scaffolding and are imported
+   nowhere — do not add rules there.) */
+
+/* Mantine dims a disabled segment's label to #adb5bd (2.07:1 on white). The
+   disabled half of the Absolute/Percent control still states which mode the map
+   is in, so it must stay readable — secondary, not invisible. The lock icon
+   carries the "unavailable" meaning instead. */
+.mantine-SegmentedControl-label[data-disabled] {
+  color: var(--mantine-color-dimmed);
+}
+
+/* Level control: a level that does not carry the variable in the selected
+   year is greyed out in both text and background, so it reads as absent
+   rather than merely secondary (the caption under the control explains).
+   The rule above keeps the Absolute/Percent control's disabled half readable;
+   this one is scoped to the Level control only. */
+.level-control .mantine-SegmentedControl-label[data-disabled] {
+  color: light-dark(var(--mantine-color-gray-5), var(--mantine-color-dark-3));
+  background-color: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6));
+  border-radius: var(--mantine-radius-sm);
+  cursor: not-allowed;
+}
