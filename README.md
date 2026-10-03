@@ -82,8 +82,9 @@ cd tools && node compare.mjs
    `.github/workflows/pages.yml` downloads that release, builds with
    `VITE_BASE=/<repo>/`, and deploys.
 
-In the repo settings, set Pages to **GitHub Actions** and add a repository
-variable `VITE_CARTO_KEY`. Restrict that key to the Pages domain in CARTO.
+In the repo settings, set Pages to **GitHub Actions** and add `VITE_CARTO_KEY`
+as a repository secret or variable (Settings → Secrets and variables →
+Actions). The build compiles it into the bundle, so a change needs a redeploy. Restrict that key to the Pages domain in CARTO.
 
 Data refreshes go into a new versioned directory and a new release. Open
 sessions keep reading the version they started with, and only

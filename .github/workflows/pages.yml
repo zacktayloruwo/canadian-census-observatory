@@ -48,7 +48,9 @@ jobs:
         working-directory: frontend
         env:
           VITE_BASE: /${{ github.event.repository.name }}/
-          VITE_CARTO_KEY: ${{ vars.VITE_CARTO_KEY }}
+          # Either a repository secret or variable works. The key is not secret
+          # (it ships in the bundle; restrict it by domain in CARTO).
+          VITE_CARTO_KEY: ${{ secrets.VITE_CARTO_KEY || vars.VITE_CARTO_KEY }}
 
       - uses: actions/upload-pages-artifact@v3
         with:
