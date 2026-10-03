@@ -141,9 +141,13 @@ async function startDuckDB(manifest, urlOf, mark) {
   await Promise.all(parquet.map((f) =>
     db.registerFileURL(regName(f.file), urlOf(f.file), duckdb.DuckDBDataProtocol.HTTP, false)));
   const conn = await db.connect();
-  // Keep Parquet footers between queries: every fact query would otherwise
-  // re-read the footer of each file in its view over HTTP.
-  await conn.query("SET enable_object_cache = true").catch(() => {});
+  // Keep Parquet footers and HTTP HEAD results between queries. Both caches
+  // are off by default, so every fact query re-fetched and re-parsed its
+  // file's footer over HTTP (430 KB for csd: 260-500 ms per query).
+  // (enable_object_cache, used before, is an old name that no longer does it.)
+  for (const setting of ["parquet_metadata_cache", "enable_http_metadata_cache"]) {
+    await conn.query(`SET ${setting} = true`).catch((err) => console.warn(`[data] ${setting}:`, err));
+  }
   for (const sql of baseTableStatements(manifest, regName)) await conn.query(sql);
   mark("duckdb");
   return conn;

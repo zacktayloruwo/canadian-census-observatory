@@ -4,7 +4,7 @@
 // static files the browser app reads through DuckDB-WASM:
 //
 //   <out>/manifest.json                  entry point; names the versioned dir
-//   <out>/<version>/facts/<lvl>_<n>.parquet  fact tables, split to stay < 50 MB
+//   <out>/<version>/facts/<lvl>_0.parquet  fact tables, one file per level
 //   <out>/<version>/all_descr.parquet    variable catalogue (+ rid = original rowid)
 //   <out>/<version>/hlook.json, lineage.json  lookups, column-wise JSON
 //   <out>/<version>/geos.json, themes.json
@@ -14,7 +14,9 @@
 // file a running session is range-reading; only manifest.json is overwritten.
 //
 // Usage: node export-data.mjs [--src <dir with observatory_v3.duckdb>] [--out <dir>]
-//        defaults: ../../unicen_js/backend/data  →  ../frontend/public/data
+//                              [--max-rows <rows per fact file>]
+//        defaults: ../../unicen_js/backend/data  →  ../frontend/public/data,
+//        one fact file per level
 
 import { DuckDBInstance } from "@duckdb/node-api";
 import fs from "node:fs";
@@ -30,9 +32,13 @@ const SRC = path.resolve(arg("src", path.join(here, "../../unicen_js/backend/dat
 const OUT = path.resolve(arg("out", path.join(here, "../frontend/public/data")));
 const DB = path.join(SRC, "observatory_v3.duckdb");
 
-// Rows per fact file. ~1.75 bytes/row compressed, so 20M rows ≈ 35 MB —
-// under GitHub's 50 MB warning and 100 MB hard limit.
-const MAX_ROWS_PER_FILE = 20_000_000;
+// Rows per fact file; by default one file per level (ct/csd ≈ 90 MB). Opening
+// a file over HTTP costs DuckDB-WASM several sequential round trips (size
+// check, footer), so on GitHub Pages three CSD files took 3.4-4.7 s before the
+// first query; one file cuts that to a third. The files never go into git
+// (they ship as a release asset), so git's 100 MB limit doesn't apply.
+// --max-rows splits at theme boundaries instead (~1.75 bytes/row).
+const MAX_ROWS_PER_FILE = Number(arg("max-rows", Infinity));
 const ROW_GROUP_SIZE = 100_000;
 const LEVELS = ["ct", "csd", "cd", "cma", "pr"];
 
@@ -47,10 +53,14 @@ const all = async (sql) => (await conn.runAndReadAll(sql)).getRowObjectsJson();
 const run = (sql) => conn.run(sql);
 const q = (s) => `'${s.replaceAll("'", "''")}'`;
 
-// Version = DATA_LAST_UPDATED-style date plus the source DB's mtime, so two
-// exports of the same build land in the same directory.
+// Version = the source DB's mtime plus the export layout, so two exports of
+// the same build with the same layout land in the same directory, and a
+// layout change never reuses a URL a browser may hold in its cache.
+// Bump LAYOUT whenever the files' names or contents change for the same DB.
+const LAYOUT = 2; // 2: one fact file per level
 const mtime = fs.statSync(DB).mtime;
-const version = `v${mtime.toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
+const version = `v${mtime.toISOString().slice(0, 19).replace(/[-:T]/g, "")}-l${LAYOUT}${
+  Number.isFinite(MAX_ROWS_PER_FILE) ? `-r${MAX_ROWS_PER_FILE}` : ""}`;
 const VDIR = path.join(OUT, version);
 fs.mkdirSync(path.join(VDIR, "facts"), { recursive: true });
 fs.mkdirSync(path.join(VDIR, "topology"), { recursive: true });

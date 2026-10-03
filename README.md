@@ -33,7 +33,8 @@ React app ──fetch("/api/…")──► data/apiFetch.js ──► data/route
   its sidecars into `frontend/public/data/` (manifest + one versioned
   directory). Fact tables keep only the 9 columns the app reads, are sorted by
   theme/code/year/geosid (so a query touches a couple of 100k-row groups), and
-  are split at theme boundaries into files under 50 MB.
+  ship as one file per level: each extra file costs DuckDB-WASM sequential
+  round trips before the first query. `--max-rows` splits them instead.
 - **`tools/compare.mjs`** — runs `routes.js` in Node over the exported files and
   compares ~3,700 responses with the running Express server. They should all
   match, except that `/api/themes?level=4&year=2016` can differ in the order of
@@ -43,7 +44,7 @@ React app ──fetch("/api/…")──► data/apiFetch.js ──► data/route
 
 | | |
 |---|---|
-| Fact Parquet (ct, csd, cd, cma, pr) | 191 MB in 9 files, largest 40 MB |
+| Fact Parquet (ct, csd, cd, cma, pr) | 191 MB, one file per level, largest 95 MB |
 | Lookups (hlook, lineage, geos, themes, all_descr) | 22 MB (JSON gzipped by Pages) |
 | TopoJSON bundles, 1851–2021 | 124 MB (gzipped by Pages) |
 | App + DuckDB-WASM | 37 MB (8 MB gzipped) |
