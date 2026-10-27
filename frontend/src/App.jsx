@@ -1403,7 +1403,9 @@ useEffect(() => {
 // no network round trip, no layer rebuild.
 const displayValues = useMemo(() => {
   if (!valuesPayload) return null;
-  const canPercent = valuesPayload.t_level === 1 && !!valuesPayload.t_denom;
+  // The server sends t_denom only when this year's rows can be a percent
+  // (any category level, real denominator code), so it alone decides.
+  const canPercent = !!valuesPayload.t_denom;
   const usePercent = effectiveValueMode === "percent" && canPercent;
   const m = new Map();
   for (const r of valuesPayload.rows) {
