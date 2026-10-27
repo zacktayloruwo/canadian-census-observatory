@@ -44,6 +44,19 @@ import { apiFetch } from "./data/apiFetch";
 // data/apiFetch.js); the origin only has to make them absolute.
 const API_BASE = window.location.origin;
 
+// Does search-list entry `g` stand for the unit coded `geosid` in census
+// `year`? An era entry (no geouid) carries the code the unit had throughout
+// its span. A lineage entry (csd/cd, carries geouid) is filed under its
+// last-year member's code, which before 1981 is usually a different place in
+// the lineage's earlier censuses (1941's 3508 is Durham, but 3508 is also the
+// Leeds lineage's 1981 code), so it stands for that code only in its last year.
+function entryIsUnit(g, geosid, year) {
+  if (String(g.geosid) !== String(geosid)) return false;
+  const y = Number(year);
+  if (g.geouid) return y === Number(g.year_max);
+  return g.year_min == null || (y >= Number(g.year_min) && y <= Number(g.year_max));
+}
+
 // Map data arrives in two parts: geometryPayload ({ fc, level, year }, cached
 // per level/year) and valuesPayload ({ rows, t_level, t_denom, ... }, small,
 // refetched per variable).  displayValues joins them client-side.
@@ -330,14 +343,13 @@ export default function App() {
 
   // Index of the option that represents `geosid` in a search-result list.
   // Several options can share a geosid (one per name era, pre-1981 codes are
-  // reused), so prefer the one whose year span holds the current year; fall
-  // back to the first with that geosid. -1 when none.
+  // reused), so prefer the one that stands for this unit in the current year
+  // (entryIsUnit); fall back to the first with that geosid. -1 when none.
   const optionIndexFor = (opts, geosid, year) => {
     if (!geosid) return -1;
     const same = opts.map((g, i) => ({ g, i })).filter(({ g }) => String(g.geosid) === String(geosid));
     if (!same.length) return -1;
-    const y = Number(year);
-    const hit = same.find(({ g }) => g.year_min == null || (y >= Number(g.year_min) && y <= Number(g.year_max)));
+    const hit = same.find(({ g }) => entryIsUnit(g, geosid, year));
     if (hit) return hit.i;
     // The same code in another era is a different place: never show that
     // entry as the selection (the sentinel item shows the real label instead).
@@ -636,6 +648,32 @@ const fetchLineage = (geosid, year, level = stateRef.current.level) =>
   apiFetch(`${API_BASE}/api/lineage?geosid=${encodeURIComponent(geosid)}&year=${year}${level ? `&level=${level}` : ""}`)
     .then((r) => (r.ok ? r.json() : null))
     .catch(() => null);
+
+// The search-list entry for a unit picked on the map in `year`, and the
+// options it was found among (handed to the Select so it can display it).
+// A lineage entry is filed under its last-year code, so the unit's lineage is
+// looked up and its entry searched for under that code; failing that, an era
+// entry under the clicked code itself. `found` is null when neither exists,
+// and the caller keeps the map's own name.
+const findEntryForUnit = async (geosid, year) => {
+  const lin = await fetchLineage(geosid, year);
+  const last = lin?.members?.find((m) => Number(m.time) === Number(lin.last_year));
+  const ids = [...new Set([String(geosid), last ? String(last.geosid) : null].filter(Boolean))];
+  const lists = await Promise.all(ids.map((id) =>
+    apiFetch(`${API_BASE}/api/geos?q=${encodeURIComponent(id)}`).then((r) => (r.ok ? r.json() : []))));
+  const seen = new Set();
+  const matches = lists.flat().filter((g) => {
+    const k = `${g.geosid}|${g.label}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  const found =
+    (lin && matches.find((g) => g.geouid && String(g.geouid) === String(lin.geouid))) ||
+    matches.find((g) => entryIsUnit(g, geosid, year)) ||
+    null;
+  return { matches, found };
+};
 useEffect(() => {
   if (!state.geosid) { focalLineageRef.current = null; return; }
   const geosid = state.geosid;
@@ -2208,18 +2246,11 @@ useEffect(() => {
             selectedRefGeosid={mapView?.year === state.year ? effectiveRefGeosid : null}
             onSelectGeosid={(geosid, geoname) => {
               dispatch({ type: "setPlace", geosid });
-              // Look up the geosid in the geos table so the Select label matches
+              // Look up the unit's search-list entry so the Select label matches
               // the dropdown format exactly, preventing a search/render cycle.
-              apiFetch(`${API_BASE}/api/geos?q=${encodeURIComponent(geosid)}`)
-                .then(r => r.ok ? r.json() : [])
-                .then(matches => {
-                  // Several entries can share a geosid (one per name era);
-                  // take the one whose span holds the current year.
-                  const y = stateRef.current.year;
-                  const same = matches.filter(g => String(g.geosid) === String(geosid));
-                  // No entry holding the year: the code belongs to another
-                  // place in every listed era, so keep the map's own name.
-                  const found = same.find(g => g.year_min == null || (y >= g.year_min && y <= g.year_max)) ?? null;
+              findEntryForUnit(geosid, stateRef.current.year)
+                .then(({ matches, found }) => {
+                  // No entry for this unit: keep the map's own name.
                   const label = found ? geoOptionLabel(found.label, found.geosid) : (geoname || geosid);
                   if (found) setGeoOptions(matches);
                   setSelectedGeoLabel(label);
@@ -2239,12 +2270,8 @@ useEffect(() => {
               dispatch({ type: "setRefPlace", geosid, label: geoname || geosid });
               // Same label bookkeeping as the focal handler: resolve the
               // dropdown-format label so the comparison Select displays it.
-              apiFetch(`${API_BASE}/api/geos?q=${encodeURIComponent(geosid)}`)
-                .then(r => r.ok ? r.json() : [])
-                .then(matches => {
-                  const y = stateRef.current.year;
-                  const same = matches.filter(g => String(g.geosid) === String(geosid));
-                  const found = same.find(g => g.year_min == null || (y >= g.year_min && y <= g.year_max)) ?? null;
+              findEntryForUnit(geosid, stateRef.current.year)
+                .then(({ matches, found }) => {
                   const label = found ? geoOptionLabel(found.label, found.geosid) : (geoname || geosid);
                   if (found) {
                     setRefGeoOptions(matches);
