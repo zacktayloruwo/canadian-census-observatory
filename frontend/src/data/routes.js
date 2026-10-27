@@ -71,18 +71,39 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
   }))).catch((err) => { geoDataPromise = null; throw err; }));
 
   let HLOOK       = [];
-  let HLOOK_MAP   = new Map();
+  let HLOOK_MAP   = new Map();    // "year:geosid"       -> row (level unknown to the caller)
+  let HLOOK_BY_LEVEL = new Map(); // "year:level:geosid" -> row (exact)
   let HLOOK_YEARS = new Map();
+  // A geosid is meant to be unique within a census year across all levels, but
+  // two known cases break that: 1996 CT rows that carry CMA codes, and the
+  // disputed area DISP at csd/cd/pr. Lookups that know the level use
+  // HLOOK_BY_LEVEL. For the rest, a collision is settled by this fixed level
+  // priority, never by table scan order.
+  const LEVEL_PRIORITY = { 2: 0, 3: 1, 4: 2, 5: 3, 1: 4 };
   {
     const rows = columnsToRows(hlookCols);
     HLOOK = rows;
+    const rank = (r) => LEVEL_PRIORITY[Number(r.level)] ?? 9;
     for (const row of rows) {
-      HLOOK_MAP.set(`${row.year}:${row.geosid}`, row);
-      if (!HLOOK_YEARS.has(row.geosid)) HLOOK_YEARS.set(row.geosid, []);
-      HLOOK_YEARS.get(row.geosid).push(row.year);
+      HLOOK_BY_LEVEL.set(`${row.year}:${row.level}:${row.geosid}`, row);
+      const key = `${row.year}:${row.geosid}`;
+      const prev = HLOOK_MAP.get(key);
+      if (!prev || rank(row) < rank(prev)) HLOOK_MAP.set(key, row);
+      if (!HLOOK_YEARS.has(row.geosid)) HLOOK_YEARS.set(row.geosid, new Set());
+      HLOOK_YEARS.get(row.geosid).add(row.year);
     }
-    for (const years of HLOOK_YEARS.values()) years.sort((a, b) => a - b);
+    for (const [g, years] of HLOOK_YEARS) HLOOK_YEARS.set(g, [...years].sort((a, b) => a - b));
   }
+  // Optional `level` query parameter as a number 1-5, else null.
+  const levelParam = (v) => { const n = Number(v); return n >= 1 && n <= 5 ? n : null; };
+  // The denominator t_code when a variable can be shown as a percent, else
+  // null. Categories (t_level >= 1; 2-4 are nested sub-categories in the v3
+  // build, and one code's t_level can change between years) carry the theme
+  // total as t_denom. Other rows carry sentinels ("noncount" at -1, "total" at
+  // 0, "ERROR - No total…") that are never a denominator.
+  const percentDenom = (t_level, t_denom) =>
+    Number(t_level) >= 1 && t_denom && t_denom !== "noncount" && t_denom !== "total" && !String(t_denom).startsWith("ERROR")
+      ? String(t_denom) : null;
   log("startup:hlook");
 
   const VALID_THEMES = new Set(THEMES.filter((t) => t.weight !== "drop").map((t) => t.t_theme));
@@ -129,7 +150,8 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     return null;
   }
 
-  function getGeoMeta(year, geosid) {
+  function getGeoMeta(year, geosid, level = null) {
+    if (level != null) return HLOOK_BY_LEVEL.get(`${year}:${level}:${geosid}`) || null;
     return HLOOK_MAP.get(`${year}:${geosid}`) || null;
   }
 
@@ -239,8 +261,7 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
         .json({ error: "year and geosid are required" });
     }
 
-    const key = `${year}:${geosid}`;
-    const row = HLOOK_MAP.get(key);
+    const row = getGeoMeta(year, geosid, levelParam(req.query.level));
 
     if (!row) {
       return res.status(404).json({
@@ -748,9 +769,10 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     levelCollection(levelNum, year).then((fc) => res.json(fc)).catch((err) => handleError(res, err));
   });
 
-  // GET /api/geo-polygon?geosid=35&year=2021
-  // Year resolution as in server.js: the requested year if hlook has the unit
-  // then, else the nearest year it exists.
+  // GET /api/geo-polygon?geosid=35&year=2021[&level=2]
+  // As in server.js: THIS unit in THIS year only (no nearest-year fallback; a
+  // code can name another place in another year), at the requested level or
+  // else hlook's, since a geosid can repeat across levels within a year.
   app.get("/api/geo-polygon", async (req, res) => {
     const geosid  = String(req.query.geosid  ?? "").trim();
     const yearReq = req.query.year ? Number(req.query.year) : null;
@@ -758,28 +780,26 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     if (!geosid)                      return res.status(400).json({ error: "geosid is required" });
     if (!yearReq || Number.isNaN(yearReq)) return res.status(400).json({ error: "year is required" });
 
-    const geosidYears = HLOOK_YEARS.get(geosid) ?? [];
-    let resolvedYear = yearReq;
-    if (geosidYears.length > 0 && !geosidYears.includes(yearReq)) {
-      resolvedYear = geosidYears.reduce((prev, cur) =>
-        Math.abs(cur - yearReq) < Math.abs(prev - yearReq) ? cur : prev
-      );
-    }
+    const resolvedYear = yearReq;
+    const level = levelParam(req.query.level) ?? levelParam(getGeoMeta(resolvedYear, geosid)?.level);
+    const onlyCode = level ? LEVEL_CODE[level] : null;
 
     try {
       // The base bundle first, then the part this id would belong to at each
       // split level (fetched only when such a part exists).
       const sources = [() => getTopology(resolvedYear)];
       for (const [code, partOf] of Object.entries(PART_OF)) {
+        if (onlyCode && code !== onlyCode) continue;
         const key = partOf(geosid);
         if (key && topologyParts(resolvedYear, code)[key]) sources.push(() => getTopology(resolvedYear, code, key));
       }
       for (const load of sources) {
         const topo = await load();
-        for (const obj of Object.values(topo?.objects ?? {})) {
+        for (const [name, obj] of Object.entries(topo?.objects ?? {})) {
+          if (onlyCode && name !== onlyCode) continue;
           const geom = obj.geometries?.find((g) => String(g.properties?.geosid) === geosid);
           if (!geom) continue;
-          const meta = getGeoMeta(resolvedYear, geosid);
+          const meta = getGeoMeta(resolvedYear, geosid, level);
           return res.json({
             type: "Feature",
             properties: { geosid, geoname: meta?.geoname ?? null },
@@ -824,11 +844,7 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
       // t_denom uses sentinel strings ("noncount", "") for variables with no
       // real denominator — normalize those to null so we skip the join and the
       // client never tries to compute a percent from them.
-      const rawDenom = meta.t_denom ?? null;
-      const denomCode =
-        rawDenom && rawDenom !== "noncount" && Number(meta.t_level) === 1
-          ? rawDenom
-          : null;
+      const denomCode = percentDenom(meta.t_level, meta.t_denom);
 
       let sql, params;
       if (denomCode) {
@@ -1099,8 +1115,8 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
       }
 
       // Label focal + ref from hlook
-      const focalMeta = getGeoMeta(year, geosid);
-      const refMeta = refGeosid ? getGeoMeta(year, refGeosid) : null;
+      const focalMeta = getGeoMeta(year, geosid, levelNum);
+      const refMeta = refGeosid ? getGeoMeta(year, refGeosid, refLevelNum) : null;
 
       const focalLabel = labelWithContext(focalMeta, geosid);
       const refLabel = labelWithContext(refMeta, refGeosid);
@@ -1268,10 +1284,9 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     }
 
     // ---- FIND REF ROW IN HLOOK ----
-    // O(1) lookup via HLOOK_MAP (keyed "year:geosid") instead of scanning the
-    // full 100k-row HLOOK array.
+    // O(1) lookup; exact when the caller passes the unit's level.
     const geosidStr = String(geosid).trim();
-    const hrow = HLOOK_MAP.get(`${year}:${geosidStr}`) ?? null;
+    const hrow = getGeoMeta(year, geosidStr, levelParam(req.query.level));
 
     if (!hrow) {
       console.warn("[nc-ref-value] No HLOOK row for", { geosid, year });
@@ -1316,11 +1331,7 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
       const t_level = meta.t_level ?? null;
       const denomCode = meta.t_denom ?? null;
 
-      const wantPercent =
-        value_mode === "percent" &&
-        t_level === 1 &&
-        denomCode != null &&
-        denomCode !== "";
+      const wantPercent = value_mode === "percent" && percentDenom(t_level, denomCode) != null;
 
       log("[nc-ref-value] meta: t_level =", t_level, "t_denom =", denomCode, "will compute percent?", wantPercent);
 
@@ -1381,10 +1392,10 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
       }
 
       const row = rows[0];
+      // A percent request never falls back to the count: without a usable
+      // denominator the value is null (the caller shows no reference line).
       const payload = {
-        value:
-          (row.value != null ? row.value : null) ??
-          (row.raw_value != null ? row.raw_value : null),
+        value: row.value ?? null,
         raw_value: row.raw_value ?? null,
         denom_value: row.denom_value ?? null,
       };
@@ -1419,29 +1430,18 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
 
     const normG = (g) => String(g).trim();
 
-    function findHlookRow(geosid) {
-      const gStr = normG(geosid);
-      // Prefer the row for the anchor year; fall back to the nearest year this
-      // geosid exists.  Both lookups are O(1) via HLOOK_MAP / HLOOK_YEARS
-      // (previously two full scans of the 100k-row HLOOK array).
-      let row = HLOOK_MAP.get(`${year}:${gStr}`);
-      if (!row) {
-        const years = HLOOK_YEARS.get(gStr) || [];
-        if (years.length > 0) {
-          const nearest = years.reduce((prev, cur) =>
-            Math.abs(cur - year) < Math.abs(prev - year) ? cur : prev
-          );
-          row = HLOOK_MAP.get(`${nearest}:${gStr}`);
-        }
-      }
-      return row || null;
+    // The unit in the anchor year only: in another year the same code can be
+    // another place, so there is no nearest-year fallback. focal_level /
+    // ref_level, when sent, make the lookup exact.
+    function findHlookRow(geosid, level) {
+      return getGeoMeta(year, normG(geosid), level);
     }
 
     function labelFromHlookRow(row) {
       return row ? labelWithContext(row) : null;
     }
 
-    const focalH = findHlookRow(focalGeosid);
+    const focalH = findHlookRow(focalGeosid, levelParam(req.query.focal_level));
     if (!focalH) {
       console.warn("[series] no HLOOK row for focal", { focalGeosid, year });
       return res.status(404).json({ error: "No metadata for focal geosid" });
@@ -1461,7 +1461,7 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     let refLabel = null;
 
     if (refGeosid) {
-      refH = findHlookRow(refGeosid);
+      refH = findHlookRow(refGeosid, levelParam(req.query.ref_level));
       if (!refH) {
         console.warn("[series] no HLOOK row for ref", { refGeosid, year });
       } else {
@@ -1477,89 +1477,55 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
 
     log("[series] params:", { focalGeosid, refGeosid, year, t_code, value_mode, focalLevel, focalTable, refLevel, refTable });
 
-    // Helper: fetch t_level + t_denom for this t_code in a given table
-    function fetchMeta(table) {
-      const metaSql = `
-        SELECT t_level, t_denom
-        FROM ${table}
-        WHERE t_code = ?
-        LIMIT 1
-      `;
-      return duckAll(metaSql, [t_code]).then((rows) => {
-        const meta = rows[0] || {};
-        return {
-          t_level: meta.t_level ?? null,
-          t_denom: meta.t_denom ?? null,
-        };
-      });
-    }
-
     // Helper: fetch full time series for one (geosid, table). Through the
     // lineage concordance the series follows the PLACE: each census year is
     // read from that year's member geosid (pre-1981 codes are reused), and
     // years outside the lineage are not returned. Without a lineage row the
     // same-code series is used, trimmed to its era (see eraYears).
+    //
+    // Percent mode reads t_level/t_denom from each year's own row (a code's
+    // t_level differs across years), joining each year to its own
+    // denominator. If any year can be a percent the series is a percent
+    // series, and a year without a usable denominator is left out rather
+    // than plotted as a count on a percent axis. If none can (density,
+    // medians), the series is the raw values, as in raw mode.
     async function fetchSeriesFor(geosid, levelNum, table) {
       const lin = lineageFor(geosid, year, levelNum);
       const memberOf = lin ? new Map(lin.members.map((m) => [m.time, m.geosid])) : null;
       const memberIds = lin ? [...new Set(lin.members.map((m) => m.geosid))] : [String(geosid)];
-      const { t_level, t_denom } = await fetchMeta(table);
-      const wantPercent =
-        value_mode === "percent" &&
-        t_level === 1 &&
-        t_denom != null &&
-        t_denom !== "";
+      const ph = memberIds.map(() => "?").join(",");
+      let rows = await duckAll(`
+        SELECT time, geosid, val_t AS raw_value, t_level, t_denom
+        FROM ${table}
+        WHERE geosid IN (${ph})
+          AND t_code = ?
+          AND level  = ?
+          AND loc    = 't'
+        ORDER BY time
+      `, [...memberIds, t_code, levelNum]);
+      if (memberOf) rows = rows.filter((r) => memberOf.get(Number(r.time)) === String(r.geosid ?? geosid));
 
-      log("[series] meta for", geosid, { t_level, t_denom, wantPercent });
-
-      let sql, params;
-
+      const wantPercent = value_mode === "percent" && rows.some((r) => percentDenom(r.t_level, r.t_denom) != null);
       if (wantPercent) {
-        // Percent series: numerator (t_code) / denominator (t_denom) * 100,
-        // for every time point, for this geosid.
-        sql = `
-          SELECT
-            num.time,
-            num.geosid,
-            num.val_t   AS raw_value,
-            denom.val_t AS denom_value,
-            CASE
-              WHEN denom.val_t IS NULL OR denom.val_t = 0 THEN NULL
-              ELSE (num.val_t * 100.0) / denom.val_t
-            END AS value
-          FROM ${table} AS num
-          LEFT JOIN ${table} AS denom
-            ON num.geosid = denom.geosid
-           AND num.time   = denom.time
-           AND num.level  = denom.level
-           AND denom.t_code = ?
-           AND denom.loc = 't'
-          WHERE num.geosid IN (${memberIds.map(() => "?").join(",")})
-            AND num.t_code = ?
-            AND num.level  = ?
-            AND num.loc    = 't'
-          ORDER BY num.time
-        `;
-        params = [t_denom, ...memberIds, t_code, levelNum];
-      } else {
-        // Raw series: just val_t over time for this geosid + t_code.
-        sql = `
-          SELECT
-            time,
-            geosid,
-            val_t AS value
+        // Denominators by code, passed as parameters (fact files are routed
+        // by the t_codes a query names), then joined per row.
+        const codes = [...new Set(rows.map((r) => percentDenom(r.t_level, r.t_denom)).filter(Boolean))];
+        const denoms = await duckAll(`
+          SELECT time, geosid, t_code, val_t
           FROM ${table}
-          WHERE geosid IN (${memberIds.map(() => "?").join(",")})
-            AND t_code = ?
+          WHERE geosid IN (${ph})
+            AND t_code IN (${codes.map(() => "?").join(",")})
             AND level  = ?
             AND loc    = 't'
-          ORDER BY time
-        `;
-        params = [...memberIds, t_code, levelNum];
+        `, [...memberIds, ...codes, levelNum]);
+        const dv = new Map();
+        for (const d of denoms) {
+          const k = `${d.time}|${d.geosid}|${d.t_code}`;
+          if (!dv.has(k)) dv.set(k, d.val_t);
+        }
+        for (const r of rows) r.denom_value = dv.get(`${r.time}|${r.geosid}|${percentDenom(r.t_level, r.t_denom)}`) ?? null;
       }
-
-      let rows = await duckAll(sql, params);
-      if (memberOf) rows = rows.filter((r) => memberOf.get(Number(r.time)) === String(r.geosid ?? geosid));
+      log("[series] for", geosid, { value_mode, wantPercent, rows: rows.length });
 
       // Filter to finite points and dedupe by time (the source tables can carry
       // more than one row per (geosid, time, t_code); duplicates previously
@@ -1568,12 +1534,12 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
       const series = [];
       for (const r of rows) {
         const time = Number(r.time);
-        const value =
-          r.value != null
-            ? Number(r.value)
-            : r.raw_value != null
-            ? Number(r.raw_value)
-            : null;
+        let value = r.raw_value != null ? Number(r.raw_value) : null;
+        if (wantPercent) {
+          const d = Number(r.denom_value);
+          value = percentDenom(r.t_level, r.t_denom) != null && value != null && Number.isFinite(d) && d !== 0
+            ? (value * 100) / d : null;
+        }
         if (!Number.isFinite(time) || value == null || !Number.isFinite(value)) continue;
         if (seen.has(time)) continue;
         seen.add(time);
