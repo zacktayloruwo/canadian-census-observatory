@@ -38,11 +38,8 @@ import NCPlot from "./NCPlot.jsx";
 import LongitudinalPlot from "./LongitudinalPlot";
 import PlotsTray, { RAIL_DEFAULT_WIDTH, RAIL_MIN_WIDTH, RAIL_MAX_WIDTH } from "./PlotsTray";
 import YearCoverage, { AXIS_Y as COVERAGE_AXIS_Y } from "./YearCoverage";
-import { apiFetch } from "./data/apiFetch";
+import { API_BASE, apiFetch } from "./data/edition";
 
-// The /api/* URLs are answered in the browser by data/routes.js (see
-// data/apiFetch.js); the origin only has to make them absolute.
-const API_BASE = window.location.origin;
 
 // Does search-list entry `g` stand for the unit coded `geosid` in census
 // `year`? An era entry (no geouid) carries the code the unit had throughout

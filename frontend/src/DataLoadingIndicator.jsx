@@ -3,12 +3,12 @@
 // "Loading…" pill shown in the centre of the map while data requests are in flight —
 // the first queries after start-up wait on DuckDB-WASM opening the Parquet
 // files over the network, which can take seconds. Appears only once requests
-// have been pending for a moment (see pendingRequests in data/apiFetch.js),
+// have been pending for a moment (see pendingRequests.js),
 // so quick queries don't flicker.
 
 import { useSyncExternalStore } from "react";
 import { Loader, useMantineColorScheme } from "@mantine/core";
-import { pendingRequests } from "./data/apiFetch";
+import { pendingRequests } from "./pendingRequests";
 
 export default function DataLoadingIndicator() {
   const visible = useSyncExternalStore(pendingRequests.subscribe, pendingRequests.isSlow);

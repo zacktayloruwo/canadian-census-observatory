@@ -1,13 +1,39 @@
 # UNI·CEN Canadian Census Observatory — static (DuckDB-WASM) edition
 
 A serverless port of the Observatory app (`unicen-observatory-js`, the
-Express + DuckDB server version). The React frontend is unchanged; the backend
-is replaced by DuckDB-WASM running in the browser over static Parquet files,
-so the whole site can be hosted on GitHub Pages.
+Express + DuckDB server version). The React frontend is shared with it; the
+backend is replaced by DuckDB-WASM running in the browser over static Parquet
+files, so the whole site can be hosted on GitHub Pages.
 
-Started from the server version at commit `9bb5619`. That version remains
-the reference implementation, and `docs/SPEC.md` and `docs/PERFORMANCE.md`
-describe it.
+The server version remains the reference implementation, and `docs/SPEC.md`
+and `docs/PERFORMANCE.md` describe it.
+
+## Keeping the two editions in step
+
+The server version is the source; this repo follows it.
+
+- **Frontend.** Every file under `frontend/src` and `frontend/public` is
+  shared, except `frontend/src/data/` (this edition's engine) and the exported
+  data. `frontend/src/data/edition.js` is the seam: both editions export
+  `API_BASE`, `apiFetch` and `startEdition` from it. Make frontend changes in
+  the server repo, commit, then copy them here:
+
+  ```bash
+  tools/sync-frontend.sh            # copies from ../unicen_js's committed HEAD
+  tools/sync-frontend.sh --check    # drift report only
+  ```
+
+  It copies files, never git history (the server repo's history holds keys),
+  and records the source commit in `UPSTREAM`. Shared dependencies must have
+  the same versions in both `frontend/package.json` files; it checks that.
+- **API.** `routes.js` ports `backend/server.js` by hand. After porting a
+  server change, run `tools/compare.mjs`, then
+  `tools/sync-frontend.sh --routes-ported` to record it in `UPSTREAM`.
+- **Data.** Both editions get each build from the server repo's
+  `deploy/release-data.sh` (export here, upload to the VM, publish the
+  release, commit `data-release.txt`; pushing deploys Pages).
+- **Check.** `deploy/check-sync.sh` in the server repo reports code and data
+  for the VM, this repo and the live Pages site.
 
 ## How it works
 
@@ -24,8 +50,8 @@ React app ──fetch("/api/…")──► data/apiFetch.js ──► data/route
 - **`frontend/src/data/routes.js`** — the API routes of `backend/server.js`,
   copied verbatim wherever possible behind a small Express-shaped shim, so the
   two can be diffed. Its header lists every deliberate difference.
-- **`frontend/src/data/apiFetch.js`** — a `fetch` stand-in for `/api/*` URLs.
-  The components only changed `fetch(` → `apiFetch(`.
+- **`frontend/src/data/apiFetch.js`** — a `fetch` stand-in for `/api/*` URLs,
+  exported to the shared components through `edition.js`.
 - **`frontend/src/data/engine.js`** — starts DuckDB-WASM and loads the lookups
   in parallel. Before each query, the router in `schema.js` points the fact
   view at only the files holding that query's variables (`facts_index.json`),
@@ -52,8 +78,9 @@ React app ──fetch("/api/…")──► data/apiFetch.js ──► data/route
   selected geography's part until the map has zoomed to it.
 - **`tools/compare.mjs`** — runs `routes.js` in Node, with the same file routing, over the exported files and
   compares ~3,700 responses with the running Express server. They should all
-  match, except that `/api/themes?level=4&year=2016` can differ in the order of
-  `lnmt`/`lnof`: the server's own order for those two changes between runs.
+  match (2026-10-27: 3,696 of 3,696); `/api/themes?level=4&year=2016` has
+  differed before in the order of `lnmt`/`lnof`, which the server can change
+  between runs.
 
 ## Data size (2026-09-12 build)
 
@@ -86,6 +113,9 @@ cd tools && node compare.mjs
 ```
 
 ## Deploying to GitHub Pages
+
+For a new data build, use the server repo's `deploy/release-data.sh`, which
+does steps 1–2 here and updates the server edition in the same run. By hand:
 
 1. Export the data (above), then publish it as a release asset. This creates
    the release and writes `data-release.txt`:

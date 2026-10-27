@@ -6,12 +6,9 @@ import { useMantineColorScheme } from "@mantine/core";
 import { faCanadianMapleLeaf } from "@fortawesome/free-brands-svg-icons";
 import { faChartSimple, faFilter } from "@fortawesome/free-solid-svg-icons";
 import { COLOR_FOCAL, COLOR_REF, COLOR_PROVINCE_BOUNDARY, HOVER_POPUP_DELAY_MS, COLOR_BRAND, CARTO_KEY, cartoTileUrl, DATA_LAST_UPDATED } from "./config";
-import { apiFetch } from "./data/apiFetch";
+import { API_BASE, apiFetch } from "./data/edition";
 import DataLoadingIndicator from "./DataLoadingIndicator";
 
-// The /api/* URLs are answered in the browser by data/routes.js (see
-// data/apiFetch.js); the origin only has to make them absolute.
-const API_BASE = window.location.origin;
 
 // Without a key CARTO serves watermarked tiles rather than an error, so nothing
 // in the console or the network panel would otherwise say why the basemap looks

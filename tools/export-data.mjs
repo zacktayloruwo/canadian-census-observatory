@@ -20,6 +20,7 @@
 //        2,000,000 rows per fact file
 
 import { DuckDBInstance } from "@duckdb/node-api";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,10 +60,11 @@ const q = (s) => `'${s.replaceAll("'", "''")}'`;
 // the same build with the same layout land in the same directory, and a
 // layout change never reuses a URL a browser may hold in its cache.
 // Bump LAYOUT whenever the files' names or contents change for the same DB.
-const LAYOUT = 6; // 2: one fact file per level; 3: small files + facts_index.json;
+const LAYOUT = 7; // 2: one fact file per level; 3: small files + facts_index.json;
                   // 4: + themeYears in the index, fact_schema in the manifest;
                   // 5: census tract boundaries split out per CMA;
-                  // 6: CSD and CD boundaries split out per province too (manifest .parts)
+                  // 6: CSD and CD boundaries split out per province too (manifest .parts);
+                  // 7: + db_md5 in the manifest
 const mtime = fs.statSync(DB).mtime;
 const version = `v${mtime.toISOString().slice(0, 19).replace(/[-:T]/g, "")}-l${LAYOUT}-r${MAX_ROWS_PER_FILE}`;
 const VDIR = path.join(OUT, version);
@@ -85,7 +87,14 @@ const FACT_COLS = `
   t_denom,
   val_t`;
 
-const manifest = { version, data_last_updated: mtime.toISOString().slice(0, 10), facts: {}, tables: {}, topology: {} };
+// MD5 of the source DB, so unicen_js's deploy/check-sync.sh can tell whether
+// this export and the server edition's database are the same build.
+const dbMd5 = await new Promise((resolve, reject) => {
+  const h = crypto.createHash("md5");
+  fs.createReadStream(DB).on("data", (d) => h.update(d)).on("end", () => resolve(h.digest("hex"))).on("error", reject);
+});
+
+const manifest = { version, data_last_updated: mtime.toISOString().slice(0, 10), db_md5: dbMd5, facts: {}, tables: {}, topology: {} };
 
 // facts_index.json: per level, which files (indexes into manifest.facts[lvl])
 // hold each t_code and each t_theme. The browser opens only those files.

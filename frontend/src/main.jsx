@@ -6,7 +6,7 @@ import "leaflet/dist/leaflet.css";
 import "./theme.css";
 import { MantineProvider, createTheme, Input } from "@mantine/core";
 import App from "./App.jsx";
-import { getApi } from "./data/engine.js";
+import { startEdition } from "./data/edition";
 import { TEXT_DIM, BORDER_CONTROL } from "./config";
 
 // Contrast fixes applied once, at the theme, rather than at each call site.
@@ -43,9 +43,8 @@ const cssVariablesResolver = () => ({
   },
 });
 
-// Start the data engine (DuckDB-WASM + lookups) now rather than at the first
-// API call from an effect, so it loads while React renders the shell.
-getApi().catch((err) => console.error("[data] start-up failed:", err));
+// Edition-specific start-up (see data/edition.js), before React renders.
+startEdition();
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
