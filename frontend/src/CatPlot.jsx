@@ -11,16 +11,16 @@ const LEGEND_ROW = 16;
 // ref series from before the comparison was cleared, so the payload alone is
 // not trusted for this.
 function CatPlot({ data, hasRef: hasRefSelection = true }) {
-  if (!data || !data.categories || data.categories.length === 0) {
-    return null;
-  }
-
-  const hasRef = hasRefSelection && !!data.ref;
+  // Hooks first: an early return before them makes React throw ("rendered
+  // fewer hooks") when a mounted plot receives an empty payload.
   const chartRef = useRef(null);
   const { colorScheme } = useMantineColorScheme();
+  const empty = !data || !data.categories || data.categories.length === 0;
+
+  const hasRef = !empty && hasRefSelection && !!data.ref;
 
   // Build categories array
-  const categories = data.categories.map((c) => ({
+  const categories = (empty ? [] : data.categories).map((c) => ({
     name: c.t_name,
     focal: c.focal_pct == null ? 0 : Number(c.focal_pct),
     ref: hasRef && c.ref_pct != null ? Number(c.ref_pct) : 0,
@@ -35,12 +35,16 @@ function CatPlot({ data, hasRef: hasRefSelection = true }) {
     "#bbbbbb",
   ];
 
-  const focalName = data.focal?.label || "Focal geography";
-  const refName = data.ref?.label || "Reference geography";
+  const focalName = data?.focal?.label || "Focal geography";
+  const refName = data?.ref?.label || "Reference geography";
+  // The chart is rebuilt only when what it draws changes. `categories` is a
+  // new array every render, so depending on it re-created the chart (and
+  // replayed its animation) on every App render: each keystroke and pan.
+  const signature = JSON.stringify([categories, focalName, refName, hasRef]);
 
   useEffect(() => {
   const dom = chartRef.current;
-  if (!dom) return;
+  if (!dom || empty) return;
 
   let chart = echarts.getInstanceByDom(dom);
   if (chart) chart.dispose();
@@ -170,7 +174,10 @@ function CatPlot({ data, hasRef: hasRefSelection = true }) {
     observer.disconnect();
     chart.dispose();
   };
-}, [categories, focalName, refName, hasRef, colorScheme]);
+// eslint-disable-next-line react-hooks/exhaustive-deps -- `signature` covers every value the chart draws
+}, [signature, colorScheme]);
+
+  if (empty) return null;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>

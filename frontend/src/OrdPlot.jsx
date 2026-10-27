@@ -5,25 +5,20 @@ import { Text, useMantineColorScheme } from "@mantine/core";
 import { seriesColors } from "./config";
 
 function OrdPlot({ data }) {
-  if (
-    !data ||
-    !Array.isArray(data.categories) ||
-    data.categories.length === 0
-  ) {
-    return null;
-  }
-
+  // Hooks first: an early return before them makes React throw ("rendered
+  // fewer hooks") when a mounted plot receives an empty payload.
   const chartRef = useRef(null);
   const { colorScheme } = useMantineColorScheme();
+  const empty = !data || !Array.isArray(data.categories) || data.categories.length === 0;
 
   const {
-    categories,
+    categories = [],
     focal = [],
     ref = [],
     focalLabel = "Focal geography",
     refLabel = "Reference geography",
     year,
-  } = data;
+  } = empty ? {} : data;
 
   // coerce to numeric arrays aligned with categories
   const focalSeries = categories.map((_, i) =>
@@ -38,14 +33,17 @@ const BAR_GAP = "20%";
 const hasRef =
   Array.isArray(ref) && ref.some((v) => Number.isFinite(Number(v)));
 
-
+// The chart is rebuilt only when what it draws changes. App passes a fresh
+// `data` object (and so fresh arrays) every render, so depending on them
+// re-created the chart on every App render: each keystroke and pan.
+const signature = JSON.stringify([categories, focalSeries, hasRef ? ref : null, focalLabel, refLabel]);
 
 useEffect(() => {
   const dom = chartRef.current;
   const refSeries = hasRef
     ? categories.map((_, i) => (Number.isFinite(Number(ref[i])) ? Number(ref[i]) : 0))
     : [];
-  if (!dom) return;
+  if (!dom || empty) return;
 
   let chart = echarts.getInstanceByDom(dom);
   if (chart) chart.dispose();
@@ -184,15 +182,10 @@ useEffect(() => {
     observer.disconnect();
     chart.dispose();
   };
-}, [
-  categories,
-  focalSeries,
-  ref,
-  focalLabel,
-  refLabel,
-  hasRef,
-  colorScheme,
-]);
+// eslint-disable-next-line react-hooks/exhaustive-deps -- `signature` covers every value the chart draws
+}, [signature, colorScheme]);
+
+  if (empty) return null;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>

@@ -35,12 +35,11 @@ function LongitudinalPlot({ seriesPayload, valueMode, useLogScale, censusYears =
 
   const isRaw = valueMode === "raw"; 
 
-  if (!seriesPayload || !seriesPayload.focal) {
-    return null;
-  }
-
-  const focal = seriesPayload.focal;
-  const ref = seriesPayload.ref || null;
+  // No early return before the hooks below: React throws ("rendered fewer
+  // hooks") when a mounted plot's payload drops under two years. `empty` is
+  // checked after them instead.
+  const focal = seriesPayload?.focal || {};
+  const ref = seriesPayload?.ref || null;
 
   const focalSeries = focal.series || [];
   const refSeries = ref?.series || [];
@@ -52,9 +51,7 @@ function LongitudinalPlot({ seriesPayload, valueMode, useLogScale, censusYears =
   const dataYears = Array.from(yearsSet).filter((y) => Number.isFinite(y)).sort((a, b) => a - b);
 
   // If fewer than 2 years, don't bother plotting
-  if (dataYears.length < 2) {
-    return null;
-  }
+  const empty = !seriesPayload?.focal || dataYears.length < 2;
 
   const minYear = dataYears[0];
   const maxYear = dataYears[dataYears.length - 1];
@@ -108,9 +105,14 @@ function LongitudinalPlot({ seriesPayload, valueMode, useLogScale, censusYears =
     return x.toFixed(2);
   };
 
+  // The chart is rebuilt only when what it draws changes; the plotted arrays
+  // are rebuilt every render, so depending on them re-created the chart (and
+  // replayed its animation) on every App render: each keystroke and pan.
+  const signature = JSON.stringify([focalPlotData, refPlotData, allYears, focal.label, ref?.label, valueMode, useLogScale]);
+
   useEffect(() => {
   const dom = chartRef.current;
-  if (!dom) return;
+  if (!dom || empty) return;
 
   let chart = echarts.getInstanceByDom(dom);
   if (chart) chart.dispose();
@@ -229,18 +231,10 @@ function LongitudinalPlot({ seriesPayload, valueMode, useLogScale, censusYears =
     observer.disconnect();
     chart.dispose();
   };
-}, [
-  focal,
-  ref,
-  focalPlotData,
-  refPlotData,
-  minYear,
-  maxYear,
-  valueMode,
-  colorScheme,
-  useLogScale,
-  seriesPayload
-]);
+// eslint-disable-next-line react-hooks/exhaustive-deps -- `signature` covers every value the chart draws
+}, [signature, colorScheme]);
+
+  if (empty) return null;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>

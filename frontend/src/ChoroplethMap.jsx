@@ -1,5 +1,5 @@
 // src/ChoroplethMap.jsx
-import React, { useEffect, useMemo, useRef, useState, forwardRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, forwardRef } from "react";
 import L from "leaflet";
 import { MapContainer, TileLayer, GeoJSON, useMap, useMapEvents, Pane, ZoomControl } from "react-leaflet";
 import { useMantineColorScheme } from "@mantine/core";
@@ -215,6 +215,22 @@ const REF_WEIGHT = 3;
 function outlineStyle(color, weight) {
   return { fill: false, color, weight, opacity: 1, interactive: false };
 }
+
+// Style callbacks for the overlay layers, defined once. react-leaflet calls
+// layer.setStyle() on every feature whenever a GeoJSON's `style` prop changes
+// identity, so an inline arrow restyles (and repaints) the layer on every
+// render.
+const STYLE_REF_CASING   = () => outlineStyle(CASING_COLOR, REF_WEIGHT + CASING_EXTRA);
+const STYLE_FOCAL_CASING = () => outlineStyle(CASING_COLOR, FOCAL_WEIGHT + CASING_EXTRA);
+const STYLE_REF          = () => outlineStyle(COLOR_REF, REF_WEIGHT);
+const STYLE_FOCAL        = () => outlineStyle(COLOR_FOCAL, FOCAL_WEIGHT);
+const STYLE_PROVINCE = () => ({
+  fill: false,
+  color: COLOR_PROVINCE_BOUNDARY,
+  weight: 1.5,
+  opacity: 0.7,
+  interactive: false,
+});
 
 // --- Generic Leaflet icon control -------------------------------------------
 //
@@ -684,6 +700,12 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
 
   // Keep styleFnRef current so the selection-change effect always sees latest values
   styleFnRef.current = styleFn;
+  // The GeoJSON layer gets this STABLE callback. react-leaflet restyles every
+  // feature whenever `style` changes identity, so passing styleFn itself
+  // repainted the whole choropleth on every render (each search keystroke,
+  // each hover tooltip). Value, palette and selection changes restyle
+  // through the effects below instead; new layers style through the ref.
+  const layerStyle = useCallback((feature) => styleFnRef.current(feature), []);
 
   // Imperatively re-style EVERY layer when the values map (or its binning)
   // changes: the Leaflet layer persists across variable / percent-toggle
@@ -698,7 +720,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
         }
       }
     }
-  }, [values, decileTransBreaks, decilePalette]);
+  }, [values, decileTransBreaks, decilePalette, transformForBins]);
 
   // Imperatively re-style layers when focal or ref selection changes
   useEffect(() => {
@@ -938,7 +960,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
               <GeoJSON
                 key={mapKey}
                 data={featureCollection}
-                style={styleFn}
+                style={layerStyle}
                 onEachFeature={onEachFeature}
               />
             )}
@@ -985,28 +1007,28 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
                 <GeoJSON
                   key={`sel-ref-casing-${mapKey}-${selectedRefGeosid}`}
                   data={selectionOutlineFC.ref}
-                  style={() => outlineStyle(CASING_COLOR, REF_WEIGHT + CASING_EXTRA)}
+                  style={STYLE_REF_CASING}
                 />
               )}
               {selectionOutlineFC.focal && (
                 <GeoJSON
                   key={`sel-focal-casing-${mapKey}-${selectedGeosid}`}
                   data={selectionOutlineFC.focal}
-                  style={() => outlineStyle(CASING_COLOR, FOCAL_WEIGHT + CASING_EXTRA)}
+                  style={STYLE_FOCAL_CASING}
                 />
               )}
               {selectionOutlineFC.ref && (
                 <GeoJSON
                   key={`sel-ref-${mapKey}-${selectedRefGeosid}`}
                   data={selectionOutlineFC.ref}
-                  style={() => outlineStyle(COLOR_REF, REF_WEIGHT)}
+                  style={STYLE_REF}
                 />
               )}
               {selectionOutlineFC.focal && (
                 <GeoJSON
                   key={`sel-focal-${mapKey}-${selectedGeosid}`}
                   data={selectionOutlineFC.focal}
-                  style={() => outlineStyle(COLOR_FOCAL, FOCAL_WEIGHT)}
+                  style={STYLE_FOCAL}
                 />
               )}
             </Pane>
@@ -1025,13 +1047,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
                   // provinces stay on screen (seen: 2021 outlines over 1871).
                   key={`pb-${year}-${provinceBoundaries.features?.length ?? 0}-${provinceBoundaries.features?.[0]?.properties?.geosid ?? ""}`}
                   data={provinceBoundaries}
-                  style={() => ({
-                    fill: false,
-                    color: COLOR_PROVINCE_BOUNDARY,
-                    weight: 1.5,
-                    opacity: 0.7,
-                    interactive: false,
-                  })}
+                  style={STYLE_PROVINCE}
                 />
               )}
             </Pane>
@@ -1049,8 +1065,8 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
                 const id = refPolygon.properties?.geosid ?? "ref";
                 return (
                   <>
-                    <GeoJSON key={`ref-casing-${id}`} data={fc} style={() => outlineStyle(CASING_COLOR, REF_WEIGHT + CASING_EXTRA)} />
-                    <GeoJSON key={`ref-${id}`} data={fc} style={() => outlineStyle(COLOR_REF, REF_WEIGHT)} />
+                    <GeoJSON key={`ref-casing-${id}`} data={fc} style={STYLE_REF_CASING} />
+                    <GeoJSON key={`ref-${id}`} data={fc} style={STYLE_REF} />
                   </>
                 );
               })()}
