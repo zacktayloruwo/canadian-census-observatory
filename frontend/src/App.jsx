@@ -110,8 +110,12 @@ function reducer(state, action) {
   switch (action.type) {
     case "setPlace":
       return { ...state, geosid: action.geosid };
-    case "setYear":
-      return { ...state, year: action.year };
+    // The only way the year changes (see changeYear in App): the year and
+    // both selections move together, each selection already resolved to its
+    // lineage member in the new year (or cleared), so no render ever pairs a
+    // code with a year in which it names another place.
+    case "changeYear":
+      return { ...state, year: action.year, geosid: action.geosid, refGeosid: action.refGeosid, refLabel: action.refLabel ?? "" };
     case "setLevel":
       return { ...state, level: action.level };
     case "setTheme":
@@ -397,8 +401,9 @@ export default function App() {
         setRefSearch(label);
       }
     };
+    setYearNotice("");
     if (found.geouid && inSpan && y !== Number(found.year_max)) {
-      fetchLineage(found.geosid, found.year_max, null).then((l) => {   // entry may be at another level
+      getLineage(found.geosid, found.year_max).then((l) => {
         const m = l?.members?.find((x) => Number(x.time) === y);
         apply(m ? m.geosid : found.geosid);
       });
@@ -408,17 +413,21 @@ export default function App() {
       // Prefer the latest year in the span that carries the current variable,
       // so the variable survives the jump (New Toronto 1931-1961: density has
       // no 1961 CSD polygons, so land on 1951, not 1961 and a reset variable).
+      // The jump goes through changeYear with the focal unit already
+      // resolved, so the comparison follows its own lineage to that year.
       const lo = Number(found.year_min), hi = Number(found.year_max);
       const withVar = codeYears.available.map(Number).filter((t) => t >= lo && t <= hi);
       const target = withVar.length ? Math.max(...withVar) : hi;
-      dispatch({ type: "setYear", year: target });
+      const jump = (geosid) => changeYear(target, { focal: { geosid: String(geosid), label } });
       if (found.geouid && target !== hi) {
-        fetchLineage(found.geosid, hi, null).then((l) => {
+        getLineage(found.geosid, hi).then((l) => {
           const m = l?.members?.find((x) => Number(x.time) === target);
-          apply(m ? m.geosid : found.geosid);
+          jump(m ? m.geosid : found.geosid);
         });
-        return;
+      } else {
+        jump(found.geosid);
       }
+      return;
     }
     apply(found.geosid);
   };
@@ -639,12 +648,29 @@ useEffect(() => {
 // every census the place exists in, so a year change can follow the PLACE
 // instead of keeping the code, which before 1981 belongs to a different unit
 // each census. Refs, not state: nothing renders from them directly.
-const focalLineageRef = useRef(null);
-const refLineageRef = useRef(null);
-const fetchLineage = (geosid, year, level = stateRef.current.level) =>
-  apiFetch(`${API_BASE}/api/lineage?geosid=${encodeURIComponent(geosid)}&year=${year}${level ? `&level=${level}` : ""}`)
-    .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null);
+// Without a level the server takes the unit's own level from hlook (then
+// tries csd and cd), which is right for any unit; state.level is only the
+// focal unit's level once /api/level has resolved it (levelFor), so it is
+// never a default here.
+// Lineages by code AND year (a code names one unit only in its own year),
+// shared as promises so a year change awaits the prefetch instead of racing
+// it. A 404 (no lineage: ct, cma, pr) is cached as null; a network failure
+// is dropped so the next call retries.
+const lineageCache = useRef(new Map());
+const getLineage = (geosid, year, level = null) => {
+  const key = `${geosid}|${year}`;
+  const cache = lineageCache.current;
+  if (!cache.has(key)) {
+    if (cache.size >= 200) cache.delete(cache.keys().next().value);
+    const p = apiFetch(`${API_BASE}/api/lineage?geosid=${encodeURIComponent(geosid)}&year=${year}${level ? `&level=${level}` : ""}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => { cache.delete(key); return null; });
+    cache.set(key, p);
+  }
+  return cache.get(key);
+};
+// The focal unit's level, only once it is known to belong to this geosid.
+const focalLevel = (geosid) => (levelFor === geosid ? stateRef.current.level : null);
 
 // The search-list entry for a unit picked on the map in `year`, and the
 // options it was found among (handed to the Select so it can display it).
@@ -653,7 +679,7 @@ const fetchLineage = (geosid, year, level = stateRef.current.level) =>
 // entry under the clicked code itself. `found` is null when neither exists,
 // and the caller keeps the map's own name.
 const findEntryForUnit = async (geosid, year) => {
-  const lin = await fetchLineage(geosid, year);
+  const lin = await getLineage(geosid, year);
   const last = lin?.members?.find((m) => Number(m.time) === Number(lin.last_year));
   const ids = [...new Set([String(geosid), last ? String(last.geosid) : null].filter(Boolean))];
   const lists = await Promise.all(ids.map((id) =>
@@ -671,59 +697,89 @@ const findEntryForUnit = async (geosid, year) => {
     null;
   return { matches, found };
 };
+// Prefetch each selection's lineage so a year change rarely waits on it.
 useEffect(() => {
-  if (!state.geosid) { focalLineageRef.current = null; return; }
-  const geosid = state.geosid;
-  fetchLineage(geosid, stateRef.current.year).then((l) => {
-    if (stateRef.current.geosid === geosid) focalLineageRef.current = l;
-  });
-}, [state.geosid, state.year]);
+  if (state.geosid) getLineage(state.geosid, stateRef.current.year, levelFor === state.geosid ? stateRef.current.level : null);
+}, [state.geosid, state.year, levelFor]);
 useEffect(() => {
-  if (!effectiveRefGeosid) { refLineageRef.current = null; return; }
-  const geosid = effectiveRefGeosid;
-  fetchLineage(geosid, stateRef.current.year).then((l) => {
-    if (stateRef.current.refGeosid === geosid) refLineageRef.current = l;
-  });
+  if (effectiveRefGeosid) getLineage(effectiveRefGeosid, stateRef.current.year);
 }, [effectiveRefGeosid, state.year]);
 
-// Follow the lineage across a year change: swap each selection to its member
-// in the new year. The Year pulldown only offers the lineage's years for the
-// primary, so a member is normally found; when it is not (comparison whose
-// lineage lacks the year) the selection is left alone and simply has no data.
+// Years in which a code names the same unit as in `year` (the lineage's
+// years, or for levels without a lineage the code's era). [] = unknown.
+const fetchGeoYears = (geosid, year, level = null) =>
+  apiFetch(`${API_BASE}/api/geoyears?geosid=${encodeURIComponent(geosid)}&year=${year}${level ? `&level=${level}` : ""}`)
+    .then((r) => (r.ok ? r.json() : []))
+    .then((ys) => ys.map(Number))
+    .catch(() => []);
+
 const lineageLabel = (lin, m) =>
   `${m.geoname ?? m.geosid} - ${(LEVEL_LABEL[lin.level] ?? "").toUpperCase()} (${lin.first_year === lin.last_year ? lin.first_year : `${lin.first_year}-${lin.last_year}`})`;
-// changeYear: every user-driven year change goes through here so the lineage
-// swaps land in the same render batch as the new year — otherwise the level
-// and values effects fire once for the OLD code at the new year (a 404 and a
-// wasted fetch) before the swap catches up.
-const changeYear = (year) => {
+
+// One line under the Year field explaining a selection the year change
+// dropped ("… has no unit in 1991"); cleared by the next year change.
+const [yearNotice, setYearNotice] = useState("");
+
+// changeYear: the ONLY way the year changes (Year pulldown, coverage strip,
+// search-entry jumps, and the effects that move the year when a geography or
+// theme lacks it). Codes are reused for other places in any period (pre-1981
+// sequences, Quebec 1991, Nunavut 2001), so before the year moves, each
+// selection is resolved to its unit in the new year:
+//   lineage member exists      -> swap to it (same unit, maybe a new code)
+//   lineage lacks the year     -> clear the selection, say so
+//   no lineage (ct, cma, pr)   -> keep the code only within its era
+// The lineage is awaited (cached, normally prefetched), and the year and both
+// selections land in one dispatch. `focal` overrides the focal unit when the
+// caller has already resolved it (a search entry picked outside its span).
+// A newer call, or a selection changed meanwhile, discards an older one.
+const yearChangeSeq = useRef(0);
+const changeYear = async (year, { focal } = {}) => {
   const y = Number(year);
   if (!Number.isFinite(y)) return;
   const cur = stateRef.current;
-  const fl = focalLineageRef.current;
-  if (cur.geosid && fl) {
-    const m = fl.members.find((x) => Number(x.time) === y);
-    if (m && String(m.geosid) !== String(cur.geosid)) {
-      const label = lineageLabel(fl, m);
-      dispatch({ type: "setPlace", geosid: m.geosid });
-      setSelectedGeoLabel(label);
-      // Mantine only re-syncs a searchable Select's text when its value
-      // string changes; across lineage swaps the value is often the same
-      // sentinel, so the text must be set here or the box goes blank.
-      setGeoSearch(label);
+  if (y === Number(cur.year) && !focal) return;
+  const seq = ++yearChangeSeq.current;
+  // -> undefined: keep; null: clear; {geosid, label}: swap
+  const resolve = async (geosid, level) => {
+    if (!geosid) return undefined;
+    const lin = await getLineage(geosid, cur.year, level);
+    if (lin?.members?.length) {
+      const m = lin.members.find((x) => Number(x.time) === y);
+      if (!m) return null;
+      return String(m.geosid) === String(geosid) ? undefined : { geosid: String(m.geosid), label: lineageLabel(lin, m) };
     }
+    const years = await fetchGeoYears(geosid, cur.year, level);
+    return years.length > 0 && !years.includes(y) ? null : undefined;
+  };
+  const [f, r] = await Promise.all([
+    focal ?? resolve(cur.geosid, focalLevel(cur.geosid)),
+    resolve(cur.refGeosid),
+  ]);
+  if (seq !== yearChangeSeq.current) return;
+  const now = stateRef.current;
+  if (now.geosid !== cur.geosid || now.refGeosid !== cur.refGeosid) return;
+
+  const geosid = f === undefined ? cur.geosid : (f?.geosid ?? null);
+  const refGeosid = r === undefined ? cur.refGeosid : (r?.geosid ?? null);
+  const refLabel = r === undefined ? cur.refLabel : (r?.label ?? "");
+  dispatch({ type: "changeYear", year: y, geosid, refGeosid, refLabel });
+
+  // Mantine only re-syncs a searchable Select's text when its value string
+  // changes; across lineage swaps the value is often the same sentinel, so
+  // the text is set here or the box goes blank.
+  if (f !== undefined) {
+    setSelectedGeoLabel(f?.label ?? "");
+    setGeoSearch(f?.label ?? "");
   }
-  const rl = refLineageRef.current;
-  if (cur.refGeosid && rl) {
-    const m = rl.members.find((x) => Number(x.time) === y);
-    if (m && String(m.geosid) !== String(cur.refGeosid)) {
-      const label = lineageLabel(rl, m);
-      dispatch({ type: "setRefPlace", geosid: m.geosid, label });
-      setSelectedRefLabel(label);
-      setRefSearch(label);
-    }
+  if (r !== undefined) {
+    setSelectedRefLabel(r?.label ?? "");
+    setRefSearch(r?.label ?? "");
   }
-  dispatch({ type: "setYear", year: y });
+  const dropped = [
+    f === null && cur.geosid ? `${selectedGeoLabel || cur.geosid} (primary)` : null,
+    r === null && cur.refGeosid ? `${cur.refLabel || cur.refGeosid} (comparison)` : null,
+  ].filter(Boolean);
+  setYearNotice(dropped.length ? `${dropped.join(" and ")} did not exist in ${y}; cleared.` : "");
 };
 
 const [geoYears, setGeoYears] = useState([]);
@@ -733,17 +789,17 @@ useEffect(() => {
   // returns only the years in which this code names the same place (pre-1981
   // codes are reused), so the Year pulldown cannot wander into another unit.
   const anchorYear = stateRef.current.year ?? state.year;
-  // The level is sent too: a unit-year with data but no polygon (csd 1961)
-  // has no hlook row for the server to read the level from.
-  apiFetch(`${API_BASE}/api/geoyears?geosid=${encodeURIComponent(state.geosid)}${anchorYear ? `&year=${anchorYear}` : ""}${state.level ? `&level=${state.level}` : ""}`)
-    .then(r => r.ok ? r.json() : [])
+  // The level is sent only once it is known to be THIS unit's (state.level
+  // still holds the previous geography's level until /api/level answers);
+  // without it the server reads the unit's level from hlook.
+  let cancelled = false;
+  fetchGeoYears(state.geosid, anchorYear, focalLevel(state.geosid))
     .then(years => {
+      if (cancelled) return;
       setGeoYears(years);
-      if (years.length > 0 && !years.includes(state.year)) {
-        dispatch({ type: "setYear", year: Math.max(...years) });
-      }
-    })
-    .catch(() => setGeoYears([]));
+      if (years.length > 0 && !years.includes(Number(state.year))) changeYear(Math.max(...years));
+    });
+  return () => { cancelled = true; };
   // state.year is a dependency on purpose: picking an entry that reuses the
   // current code in another era (Barton 1861 -> Beckwith 1891, both 3540002)
   // changes the year but not the geosid, and the years must follow the era.
@@ -814,12 +870,13 @@ useEffect(() => {
       const years = (await res.json()).map(Number); // normalize to numbers
       setYearOptions(years);
 
-      // Keep current year if still available, otherwise choose a sensible default
+      // Keep the current year if the theme has it; otherwise move to the
+      // latest year that has both the theme AND the selected place, through
+      // changeYear so the selections follow their lineage.
       if (years.length > 0 && !years.includes(Number(state.year))) {
-        const newYear = Math.max(...years);
-        if (newYear !== state.year) {
-          dispatch({ type: "setYear", year: newYear });
-        }
+        const geoSet = new Set(geoYears.map(Number));
+        const both = years.filter((y) => geoSet.has(y));
+        changeYear(Math.max(...(both.length ? both : years)));
       }
     } catch (err) {
       console.error("Error fetching years:", err);
@@ -1985,6 +2042,9 @@ useEffect(() => {
               </div>
               {coverageSummary && (
                 <Text size="xs" c="dimmed" mt={5}>{coverageSummary}</Text>
+              )}
+              {yearNotice && (
+                <Text size="xs" c="orange" mt={5} role="status">{yearNotice}</Text>
               )}
             </div>
 
