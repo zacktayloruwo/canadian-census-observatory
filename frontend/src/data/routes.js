@@ -315,11 +315,16 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
   function normName(g) {
     return String(g ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "");
   }
-  function eraYears(geosid, year) {
+  // (server.js eraYears: CT/CMA/PR only; a CSD/CD without a lineage row gets
+  // its own year, a code absent in `year` gets none)
+  function eraYears(geosid, year, level = null) {
     const gStr = String(geosid).trim();
-    const years = HLOOK_YEARS.get(gStr) || [];
     const y = Number(year);
-    if (!years.length || !Number.isFinite(y) || !years.includes(y)) return years;
+    const lv = level != null ? Number(level) : Number(getGeoMeta(y, gStr)?.level);
+    const years = (HLOOK_YEARS.get(gStr) || []).filter((t) => !lv || getGeoMeta(t, gStr, lv));
+    if (!Number.isFinite(y)) return years;
+    if (!years.includes(y)) return [];
+    if (lv === 2 || lv === 3) return [y];
     if (y >= 1976) return years.filter((t) => t >= 1976);
     const nameAt = (t) => normName(HLOOK_MAP.get(`${t}:${gStr}`)?.geoname);
     const target = nameAt(y);
@@ -337,9 +342,11 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     const { geosid } = req.query;
     if (!geosid) return res.status(400).json({ error: "geosid is required" });
     const year = req.query.year ? Number(req.query.year) : null;
-    const lin = year ? lineageFor(geosid, year, req.query.level || null) : null;
-    if (lin) return res.json(lin.members.map((m) => m.time));
-    res.json(eraYears(geosid, year));
+    const level = levelParam(req.query.level);
+    const lin = year ? lineageFor(geosid, year, level) : null;
+    // only years with an hlook row (a polygon or census data), as in server.js
+    if (lin) return res.json(lin.members.filter((m) => getGeoMeta(m.time, m.geosid, lin.level)).map((m) => m.time));
+    res.json(eraYears(geosid, year, level));
   });
 
   // GET /api/lineage?geosid=&year=[&level=] → the geouid lineage this unit
@@ -1561,15 +1568,15 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
 
     // A series must not cross into years where the code named another place
     // (pre-1981 code reuse): keep only the era of the anchor year.
-    const inEra = (geosid, series) => {
-      if (lineageFor(geosid, year)) return series;          // already lineage-resolved
-      const era = new Set(eraYears(geosid, year));
+    const inEra = (geosid, level, series) => {
+      if (lineageFor(geosid, year, level)) return series;          // already lineage-resolved
+      const era = new Set(eraYears(geosid, year, level));
       return era.size ? series.filter((p) => era.has(p.time)) : series;
     };
     Promise.all([focalPromise, refPromise])
       .then(([focalSeries, refSeries]) => {
-        focalSeries = inEra(focalGeosid, focalSeries);
-        if (refSeries) refSeries = inEra(refGeosid, refSeries);
+        focalSeries = inEra(focalGeosid, focalLevel, focalSeries);
+        if (refSeries) refSeries = inEra(refGeosid, refLevel, refSeries);
         res.set("Cache-Control", "no-cache");
         res.json({
           focal: {
