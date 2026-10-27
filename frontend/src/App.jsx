@@ -78,6 +78,63 @@ const initialState = {
   refLabel: "",
 };
 
+// ── URL state ────────────────────────────────────────────────────────────────
+// The view lives in the query string, so it can be bookmarked, shared and
+// walked with Back/Forward:
+//   y year · l level · g geography · r comparison · t theme · v variable
+//   m value mode (raw|percent) · page (docs|about; absent = map)
+// A geosid names a unit only within its year, so g and r are always read
+// together with y. A URL with no parameters keeps the defaults above; one
+// with parameters means exactly what it says (no r = no comparison).
+function viewFromUrl(search) {
+  const q = new URLSearchParams(search);
+  const page = ["docs", "about"].includes(q.get("page")) ? q.get("page") : "map";
+  if (![...q.keys()].length) return { page };
+  const num = (k) => { const n = Number(q.get(k)); return q.get(k) && Number.isFinite(n) ? n : null; };
+  const view = { page, geosid: q.get("g") || null, refGeosid: q.get("r") || null };
+  if (num("y")) view.year = num("y");
+  if (num("l") >= 1 && num("l") <= 5) view.level = num("l");
+  if (q.get("t")) view.theme = q.get("t");
+  if (q.get("v")) view.t_code = q.get("v");
+  if (["raw", "percent"].includes(q.get("m"))) view.valueMode = q.get("m");
+  return view;
+}
+
+function viewToSearch(state, page) {
+  const q = new URLSearchParams();
+  if (state.year) q.set("y", state.year);
+  if (state.level) q.set("l", state.level);
+  if (state.geosid) q.set("g", state.geosid);
+  if (state.refGeosid) q.set("r", state.refGeosid);
+  if (state.theme) q.set("t", state.theme);
+  const code = state.intendedCode || state.t_code;   // the user's pick, not a fallback
+  if (code) q.set("v", code);
+  if (state.valueMode) q.set("m", state.valueMode);
+  if (page && page !== "map") q.set("page", page);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+// State with a parsed view applied. A theme or variable from the URL arrives
+// without its labels; the theme and code lists fill them in when they load,
+// and the variable is the intended one, so a year without it shows a
+// fallback and restores it where it exists (same rule as a user pick).
+function withView(state, view) {
+  const next = { ...state };
+  for (const k of ["year", "level", "geosid", "refGeosid", "valueMode"]) if (k in view) next[k] = view[k];
+  if (view.theme && view.theme !== state.theme) Object.assign(next, { theme: view.theme, themeLabel: "", themeType: null });
+  if (view.t_code) {
+    if (view.t_code !== state.t_code) Object.assign(next, { t_code: view.t_code, codeLabel: "", codeLevel: null });
+    Object.assign(next, { intendedCode: view.t_code, intendedLabel: "" });
+  }
+  if ("refGeosid" in view && view.refGeosid !== state.refGeosid) next.refLabel = "";
+  return next;
+}
+
+const INITIAL_VIEW = typeof window === "undefined" ? { page: "map" } : viewFromUrl(window.location.search);
+const INITIAL_STATE = withView(initialState, INITIAL_VIEW);
+const INITIAL_FROM_URL = Boolean(INITIAL_VIEW.geosid || INITIAL_VIEW.refGeosid);
+
 const LEVEL_LABEL = {
   1: "ct",
   2: "csd",
@@ -118,6 +175,12 @@ function reducer(state, action) {
       return { ...state, year: action.year, geosid: action.geosid, refGeosid: action.refGeosid, refLabel: action.refLabel ?? "" };
     case "setLevel":
       return { ...state, level: action.level };
+    // Back/Forward: the whole view from the URL in one step.
+    case "hydrate":
+      return withView(state, action.view);
+    // Labels for a theme that arrived by URL (setTheme would reset the code).
+    case "setThemeMeta":
+      return { ...state, themeLabel: action.themeLabel, themeType: action.themeType ?? null };
     case "setTheme":
           return {
             ...state,
@@ -236,7 +299,7 @@ function ResizeHandle({ side, currentWidth, onResize, onCollapse, minWidth = 180
 }
 
 export default function App() {
-  const [state, dispatch] = useReducer(reducer, initialState);
+  const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   // Live mirror of `state` for async effects: a fetch that resolves after a
   // later dispatch must decide against the CURRENT selection, not the render
   // snapshot it was started from (the codes fetch below is the case that bit:
@@ -288,7 +351,7 @@ export default function App() {
   // Layout state
   const [searchColOpen, setSearchColOpen] = useState(true);
   const [searchColWidth, setSearchColWidth] = useState(340);
-  const [activePage, setActivePage] = useState("map");
+  const [activePage, setActivePage] = useState(INITIAL_VIEW.page);
   const [showHelpOverlay, setShowHelpOverlay] = useState(false);
 
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
@@ -340,7 +403,8 @@ export default function App() {
 
   // Label for the currently selected geo (kept so Select can display it when geosid
   // is set externally, e.g. by clicking a polygon, before new search results load).
-  const [selectedGeoLabel, setSelectedGeoLabel] = useState("Ottawa (C) - CSD (2001-2021)");
+  // (a geography from the URL is named once its search entry is looked up)
+  const [selectedGeoLabel, setSelectedGeoLabel] = useState(INITIAL_FROM_URL ? (INITIAL_STATE.geosid ?? "") : "Ottawa (C) - CSD (2001-2021)");
 
   // Index of the option that represents `geosid` in a search-result list.
   // Several options can share a geosid (one per name era, pre-1981 codes are
@@ -531,7 +595,7 @@ useEffect(() => {
 // fetch effects can skip the window where a new geography is selected but the
 // level in state still belongs to the previous one (previously this fired
 // wrong-level plot/map requests that were immediately superseded).
-const [levelFor, setLevelFor] = useState(initialState.geosid);
+const [levelFor, setLevelFor] = useState(INITIAL_STATE.geosid);
 
 useEffect(() => {
   if (!state.geosid || !state.year) return;
@@ -619,6 +683,12 @@ useEffect(() => {
           : availableThemes.length > 0
           ? availableThemes[0]
           : null;
+
+      // A theme from the URL is valid but has no label yet.
+      if (newTheme === state.theme && newTheme != null && !stateRef.current.themeLabel) {
+        const selected = opts.find((t) => t.value === newTheme);
+        dispatch({ type: "setThemeMeta", themeLabel: selected?.label ?? newTheme, themeType: selected?.t_type ?? null });
+      }
 
       if (newTheme !== state.theme && newTheme != null) {
         const selected = opts.find((t) => t.value === newTheme);
@@ -781,6 +851,68 @@ const changeYear = async (year, { focal } = {}) => {
   ].filter(Boolean);
   setYearNotice(dropped.length ? `${dropped.join(" and ")} did not exist in ${y}; cleared.` : "");
 };
+
+// ── URL sync (see viewFromUrl) ───────────────────────────────────────────────
+// Picking another place or page adds a history entry, so Back returns to it;
+// everything else (year, variable, mode, a lineage swap on a year change)
+// replaces the current entry, so Back is not a walk through every tweak.
+const urlSeenRef = useRef({ geosid: INITIAL_STATE.geosid, year: INITIAL_STATE.year, page: INITIAL_VIEW.page });
+const fromHistoryRef = useRef(false);
+useEffect(() => {
+  const seen = urlSeenRef.current;
+  urlSeenRef.current = { geosid: state.geosid, year: state.year, page: activePage };
+  const search = viewToSearch(state, activePage);
+  if (search === window.location.search) { fromHistoryRef.current = false; return; }
+  const newPlace = state.geosid !== seen.geosid && state.year === seen.year;
+  const push = !fromHistoryRef.current && (newPlace || activePage !== seen.page);
+  fromHistoryRef.current = false;
+  const url = `${window.location.pathname}${search}${window.location.hash}`;
+  if (push) window.history.pushState(null, "", url); else window.history.replaceState(null, "", url);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the URL fields are the deps
+}, [state.year, state.level, state.geosid, state.refGeosid, state.theme, state.t_code, state.intendedCode, state.valueMode, activePage]);
+
+// Names for the search boxes when the view came from the URL (first load, or
+// Back/Forward): the entry for each unit IN ITS YEAR (a lineage entry is
+// filed under its last-year code, which findEntryForUnit resolves).
+const [labelRequest, setLabelRequest] = useState(INITIAL_FROM_URL ? 1 : 0);
+useEffect(() => {
+  if (!labelRequest) return;
+  const { geosid, refGeosid, year } = stateRef.current;
+  let cancelled = false;
+  const nameOf = async (g) => {
+    const { found } = await findEntryForUnit(g, year);
+    return found ? geoOptionLabel(found.label, found.geosid) : g;
+  };
+  (async () => {
+    if (geosid) {
+      const label = await nameOf(geosid);
+      if (cancelled || stateRef.current.geosid !== geosid) return;
+      setSelectedGeoLabel(label); setGeoSearch(label);
+    } else { setSelectedGeoLabel(""); setGeoSearch(""); }
+    if (refGeosid) {
+      const label = await nameOf(refGeosid);
+      if (cancelled || stateRef.current.refGeosid !== refGeosid) return;
+      dispatch({ type: "setRefPlace", geosid: refGeosid, label });
+      setSelectedRefLabel(label); setRefSearch(label);
+    } else { setSelectedRefLabel(""); setRefSearch(""); }
+  })();
+  return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once per URL arrival
+}, [labelRequest]);
+
+useEffect(() => {
+  const onPop = () => {
+    const view = viewFromUrl(window.location.search);
+    fromHistoryRef.current = true;
+    yearChangeSeq.current++;             // drop a year change still resolving
+    setYearNotice("");
+    dispatch({ type: "hydrate", view });
+    setActivePage(view.page);
+    setLabelRequest((n) => n + 1);
+  };
+  window.addEventListener("popstate", onPop);
+  return () => window.removeEventListener("popstate", onPop);
+}, []);
 
 const [geoYears, setGeoYears] = useState([]);
 useEffect(() => {
