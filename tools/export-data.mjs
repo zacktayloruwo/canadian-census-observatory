@@ -203,10 +203,15 @@ manifest.tables.facts_index = { file: "facts_index.json", bytes: fs.statSync(pat
 // ({ column: [values] }) — the browser parses that natively in a fraction of
 // the time it took to pull 260k rows out of DuckDB-WASM (~5 s at start-up).
 const LOOKUPS = {
-  hlook: `SELECT geosid, year, level, geoname, prname, prabbr, pruid, cmaname FROM hlook`,
+  hlook: `SELECT geosid, year, level, geoname, prname, prabbr, pruid, cmaname, cduid, cmauid FROM hlook`,
   lineage: `SELECT level, time, geosid, geouid, status, geoname, in_scope FROM geouid_concordance`,
+  // unit-view events; optional (builds before the 2026-10-28 data-prep lack it)
+  events: `SELECT level, time_from, time_to, geosid_from, geosid_to, geouid_from, geouid_to,
+                  event, tier, review, share_from, share_to, note FROM geouid_events`,
 };
+const tables = new Set((await conn.runAndReadAll("SELECT table_name FROM information_schema.tables")).getColumnsObjectJson().table_name);
 for (const [name, sql] of Object.entries(LOOKUPS)) {
+  if (name === "events" && !tables.has("geouid_events")) { console.log("events.json  skipped (no geouid_events table)"); continue; }
   const file = `${name}.json`;
   const cols = (await conn.runAndReadAll(sql)).getColumnsObjectJson();
   fs.writeFileSync(path.join(VDIR, file), JSON.stringify(cols));

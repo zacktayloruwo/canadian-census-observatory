@@ -117,6 +117,11 @@ const fixed = [
   "/api/geoyears?geosid=4611040&year=2021&level=2", "/api/geoyears?geosid=3506008&year=1911",
   "/api/geoyears?geosid=3541009&year=1861", "/api/geoyears?geosid=35",
   "/api/lineage?geosid=4611040&year=2021&level=2", "/api/lineage?geosid=3518002&year=1861", "/api/lineage?geosid=35&year=2021",
+  // unit view: an amalgamation (Toronto 2001), a renamed unit across a province
+  // change (Arviat), a pre-1981 CSD, a CD, a CMA (no lineage), a tract, and absence
+  "/api/unit?geosid=3520005&year=2021", "/api/unit?geosid=6205015&year=2021", "/api/unit?geosid=1305014&year=2021",
+  "/api/unit?geosid=3541009&year=1861", "/api/unit?geosid=2405&year=2021&level=3", "/api/unit?geosid=535&year=2021&level=4",
+  "/api/unit?geosid=5350001.00&year=2021", "/api/unit?geosid=9999999&year=2021",
   "/api/code-levels?t_code=dnk2&year=2021", "/api/code-levels?t_code=dnk2&year=1851",
   "/api/code-years?level=2&t_code=dnk2", "/api/code-years?level=1&t_code=dnk2",
   "/api/nc-ref-value?geosid=35&year=2021&t_code=dnk2",

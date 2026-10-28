@@ -368,6 +368,110 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
                members });
   });
 
+  // ── unit view (server.js loadEvents, unitView, /api/unit) ──
+  // events.json is read on the first /api/unit request, not at start-up; a
+  // data release without it (built before the events table existed) gives
+  // units with no events.
+  let eventsPromise = null;
+  // (Promise.resolve first: the browser's readJson throws synchronously for a
+  // table the manifest does not list.)
+  const eventsByGeouid = () => (eventsPromise ??= Promise.resolve().then(() => readJson("events")).then((cols) => {
+    const m = new Map();
+    for (const r of columnsToRows(cols)) {
+      const e = { ...r, level: Number(r.level), time_from: Number(r.time_from), time_to: Number(r.time_to),
+                  share_from: r.share_from == null ? null : Number(r.share_from),
+                  share_to: r.share_to == null ? null : Number(r.share_to),
+                  review: r.review === true || r.review === "TRUE" };
+      for (const g of new Set([e.geouid_from, e.geouid_to])) {
+        if (!m.has(g)) m.set(g, []);
+        m.get(g).push(e);
+      }
+    }
+    return m;
+  }).catch(() => new Map()));
+
+  // GET /api/unit?geosid=&year=[&level=] → everything the unit view shows for
+  // one unit (docs/UNIT-LINEAGE-VIEW.md):
+  //   { geouid, level, first_year, last_year,
+  //     names:     [{ name, from, to }]                  names carried, in order
+  //     members:   [{ time, geosid, geoname, status, has_data }]
+  //     events:    [{ time_from, time_to, event, direction: in|out|self, tier, review,
+  //                   share_from, share_to, note,
+  //                   other: { geosid, geoname, geouid, first_year, last_year, time } | null }]
+  //     hierarchy: [{ time, pr: {geosid, name}, cd: {geosid, name, geouid} | null,
+  //                   cma: {geosid, name} | null }] }
+  // Units without a lineage (CT, CMA, PR) get their era as members and no
+  // events; geouid is null. 404 when the unit does not exist in `year`.
+  async function unitView(geosid, year, level) {
+    const lin = lineageFor(geosid, year, level);
+    const EVENTS_BY_GEOUID = await eventsByGeouid();   // (port: events.json, loaded on first use)
+    const lv = lin ? lin.level : (level ?? Number(getGeoMeta(year, geosid)?.level));
+    if (!lin && !getGeoMeta(year, geosid, lv)) return null;
+    const members = lin
+      ? lin.members.map((m) => ({ time: m.time, geosid: m.geosid, geoname: m.geoname, status: m.status }))
+      : eraYears(geosid, year, lv).map((t) => ({ time: t, geosid: String(geosid), geoname: getGeoMeta(t, geosid, lv)?.geoname ?? null, status: null }));
+    for (const m of members) m.has_data = Boolean(getGeoMeta(m.time, m.geosid, lv));
+
+    const names = [];
+    for (const m of members) {
+      const name = m.geoname ?? m.geosid;
+      const last = names[names.length - 1];
+      if (last && last.name === name) last.to = m.time;
+      else names.push({ name, from: m.time, to: m.time });
+    }
+
+    const span = (g) => {
+      const ms = LINEAGE_MEMBERS.get(g) || [];
+      return ms.length ? { first_year: ms[0].time, last_year: ms[ms.length - 1].time } : { first_year: null, last_year: null };
+    };
+    const events = (lin ? EVENTS_BY_GEOUID.get(lin.geouid) || [] : []).map((e) => {
+      const out = e.geouid_from === lin.geouid, inn = e.geouid_to === lin.geouid;
+      const direction = out && inn ? "self" : out ? "out" : "in";
+      const side = direction === "in"
+        ? { geosid: e.geosid_from, geouid: e.geouid_from, time: e.time_from }
+        : { geosid: e.geosid_to, geouid: e.geouid_to, time: e.time_to };
+      return {
+        time_from: e.time_from, time_to: e.time_to, event: e.event, direction,
+        tier: e.tier, review: e.review, share_from: e.share_from, share_to: e.share_to, note: e.note || "",
+        other: direction === "self" ? null : {
+          geosid: side.geosid, geouid: side.geouid, time: side.time,
+          geoname: LINEAGE_BY_KEY.get(`${lin.level}:${side.time}:${side.geosid}`)?.geoname ?? null,
+          ...span(side.geouid),
+        },
+      };
+    }).sort((a, b) => a.time_from - b.time_from || a.direction.localeCompare(b.direction));
+
+    const hierarchy = members.map((m) => {
+      const h = getGeoMeta(m.time, m.geosid, lv);
+      const pruid = h?.pruid ?? (lv === 5 ? m.geosid : null);
+      const cdId = lv === 2 ? h?.cduid : null;
+      const cmaId = (lv === 1 || lv === 2) ? h?.cmauid : null;
+      const cdRow = cdId ? getGeoMeta(m.time, cdId, 3) : null;
+      const cmaRow = cmaId ? getGeoMeta(m.time, String(cmaId).slice(0, 3), 4) : null;
+      return {
+        time: m.time,
+        pr: pruid ? { geosid: pruid, name: h?.prname ?? getGeoMeta(m.time, pruid, 5)?.geoname ?? null } : null,
+        cd: cdRow ? { geosid: cdId, name: cdRow.geoname, geouid: LINEAGE_BY_KEY.get(`3:${m.time}:${cdId}`)?.geouid ?? null } : null,
+        cma: cmaRow ? { geosid: cmaRow.geosid, name: cmaRow.geoname } : null,
+      };
+    });
+
+    return {
+      geouid: lin?.geouid ?? null, level: lv,
+      first_year: members[0]?.time ?? null, last_year: members[members.length - 1]?.time ?? null,
+      names, members, events, hierarchy,
+    };
+  }
+  app.get("/api/unit", async (req, res) => {
+    const { geosid } = req.query;
+    const year = req.query.year ? Number(req.query.year) : null;
+    if (!geosid || !year) return res.status(400).json({ error: "geosid and year are required" });
+    const view = await unitView(String(geosid).trim(), year, levelParam(req.query.level));
+    if (!view) return res.status(404).json({ error: "no such unit in this year" });
+    res.set("Cache-Control", "no-cache");
+    res.json(view);
+  });
+
   // ── catalogue routes (verbatim, server.js 606-883) ──
   const LEVEL_CODE = {
     1: "ct",
