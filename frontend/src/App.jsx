@@ -22,7 +22,6 @@ import {
   IconFocus2,
   IconInfoCircle,
   IconLock,
-  IconTimeline,
 } from "@tabler/icons-react";
 import { APP_VERSION, APP_LAST_UPDATED, DATA_LAST_UPDATED, geoDisplayName, geoOptionLabel, seriesColors, COLOR_BRAND, COLOR_BRAND_DARK } from "./config";
 import { faCircleChevronLeft, faCalendar } from "@fortawesome/free-solid-svg-icons";
@@ -2274,14 +2273,16 @@ useEffect(() => {
                 </ActionIcon>
                 <ActionIcon
                   size={28}
-                  variant="default"
-                  title="Show this place across census years"
+                  // Pressed while its card is open; a second click closes it.
+                  variant={cardFor === "focal" ? "filled" : "default"}
+                  title={cardFor === "focal" ? "Close the timeline" : "Show this place across census years"}
                   aria-label="Show the primary geography across census years"
+                  aria-pressed={cardFor === "focal"}
                   disabled={!state.geosid}
-                  onClick={() => setCardFor("focal")}
+                  onClick={() => setCardFor((c) => (c === "focal" ? null : "focal"))}
                   style={{ borderRadius: 6, flexShrink: 0 }}
                 >
-                  <IconTimeline size={15} />
+                  <IconInfoCircle size={16} />
                 </ActionIcon>
               </div>
             </div>
@@ -2346,14 +2347,16 @@ useEffect(() => {
                 </ActionIcon>
                 <ActionIcon
                   size={28}
-                  variant="default"
-                  title="Show this place across census years"
+                  // Pressed while its card is open; a second click closes it.
+                  variant={cardFor === "ref" ? "filled" : "default"}
+                  title={cardFor === "ref" ? "Close the timeline" : "Show this place across census years"}
                   aria-label="Show the comparison geography across census years"
+                  aria-pressed={cardFor === "ref"}
                   disabled={!effectiveRefGeosid}
-                  onClick={() => setCardFor("ref")}
+                  onClick={() => setCardFor((c) => (c === "ref" ? null : "ref"))}
                   style={{ borderRadius: 6, flexShrink: 0 }}
                 >
-                  <IconTimeline size={15} />
+                  <IconInfoCircle size={16} />
                 </ActionIcon>
               </div>
             </div>
@@ -2686,6 +2689,14 @@ useEffect(() => {
             level={cardFor === "focal" && levelFor === state.geosid ? state.level : null}
             accent={seriesColors(colorScheme)[cardFor === "ref" ? "ref" : "focal"]}
             onJumpYear={(y) => changeYear(y)}
+            // A grey track: that lineage becomes the primary geography, in the
+            // census of the link (Scarborough 1996 from Toronto 2001); the
+            // card follows it.
+            onOpenNeighbour={cardFor === "focal" ? (n, lvl) => {
+              const span = n.first_year === n.last_year ? `${n.first_year}` : `${n.first_year}-${n.last_year}`;
+              changeYear(n.time, { focal: { geosid: String(n.geosid),
+                label: `${n.geoname ?? n.geosid} - ${(LEVEL_LABEL[lvl] ?? "").toUpperCase()} (${span})` } });
+            } : null}
           />
 
           {showHelpOverlay && (
