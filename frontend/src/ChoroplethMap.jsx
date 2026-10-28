@@ -1,5 +1,5 @@
 // src/ChoroplethMap.jsx
-import React, { useCallback, useEffect, useMemo, useRef, useState, forwardRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, forwardRef } from "react";
 import L from "leaflet";
 import { MapContainer, TileLayer, GeoJSON, useMap, useMapEvents, Pane, ZoomControl } from "react-leaflet";
 import { useMantineColorScheme } from "@mantine/core";
@@ -8,6 +8,8 @@ import { faChartSimple, faFilter } from "@fortawesome/free-solid-svg-icons";
 import { COLOR_FOCAL, COLOR_REF, COLOR_PROVINCE_BOUNDARY, HOVER_POPUP_DELAY_MS, COLOR_BRAND, CARTO_KEY, cartoTileUrl, DATA_LAST_UPDATED } from "./config";
 import { API_BASE, apiFetch } from "./data/edition";
 import DataLoadingIndicator from "./DataLoadingIndicator";
+import LoadErrorBanner from "./LoadErrorBanner";
+import { pendingRequests } from "./pendingRequests";
 
 
 // Without a key CARTO serves watermarked tiles rather than an error, so nothing
@@ -599,6 +601,8 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
   const hoverTimerRef = useRef(null);
   const mapRef        = useRef(null);
   const [hoverTooltip, setHoverTooltip] = useState(null); // { html, x, y } | null
+  // Any data request in flight (pendingRequests.js): gates the "no map data" note.
+  const busy = useSyncExternalStore(pendingRequests.subscribe, pendingRequests.isBusy);
 
   // Layer identity is the geometry identity: a level or year change, or more
   // census tracts arriving, remounts the GeoJSON layer. Variable / mode
@@ -1137,7 +1141,9 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
           No map is available for this census year.
         </div>
       )}
-      {!hasData && geometry === null && (
+      {/* Only when nothing is loading: during the first load (and any slow
+          one) the loading indicator speaks instead of a misleading "no data". */}
+      {!hasData && geometry === null && !busy && (
         <p style={{ position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)", color: "#555", background: "rgba(255,255,255,0.85)", padding: "4px 10px", borderRadius: 4, fontSize: 13 }}>
           No map data. Choose a place, theme, year, and category.
         </p>
@@ -1175,6 +1181,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
           floating between two classes. Reading an exact interior break is the
           thing this trades away. */}
       <DataLoadingIndicator />
+      <LoadErrorBanner />
 
       {/* Top-left stack: the legend, then the selector-panel button beneath it.
           A flex column rather than a hand-computed offset, so the button

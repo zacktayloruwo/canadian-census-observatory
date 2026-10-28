@@ -37,6 +37,7 @@ import OrdPlot from "./OrdPlot.jsx";
 import NCPlot from "./NCPlot.jsx";
 import LongitudinalPlot from "./LongitudinalPlot";
 import PlotsTray, { RAIL_DEFAULT_WIDTH, RAIL_MIN_WIDTH, RAIL_MAX_WIDTH } from "./PlotsTray";
+import PlotErrorBoundary from "./PlotErrorBoundary";
 import YearCoverage, { AXIS_Y as COVERAGE_AXIS_Y } from "./YearCoverage";
 import { API_BASE, apiFetch } from "./data/edition";
 
@@ -314,6 +315,8 @@ export default function App() {
     state.themeType === "nc" || state.codeLevel === -1;
 
   const effectiveValueMode = isNonCountVariable ? "raw" : state.valueMode;
+  // A new selection resets a plot that failed to draw (PlotErrorBoundary).
+  const plotResetKey = `${state.geosid}|${state.refGeosid}|${state.year}|${state.level}|${state.t_code}|${effectiveValueMode}`;
 
   const logForNc = isNonCountVariable && state.useLogScale;
 
@@ -2555,7 +2558,7 @@ useEffect(() => {
             hasFocal={!!state.geosid}
             hasRef={!!effectiveRefGeosid}
             profile={
-              <>
+              <PlotErrorBoundary resetKey={plotResetKey}>
                 {csPayload && !isNonCountVariable && (
                   <CatPlot data={csPayload} hasRef={!!effectiveRefGeosid} />
                 )}
@@ -2592,16 +2595,18 @@ useEffect(() => {
                     Select a geography and variable to see data here.
                   </Text>
                 )}
-              </>
+              </PlotErrorBoundary>
             }
             overTime={
               seriesPayload?.focal?.series?.length > 1 ? (
-                <LongitudinalPlot
-                  seriesPayload={seriesPayload}
-                  valueMode={effectiveValueMode}
-                  useLogScale={false}
-                  censusYears={codeYears.census}
-                />
+                <PlotErrorBoundary resetKey={plotResetKey}>
+                  <LongitudinalPlot
+                    seriesPayload={seriesPayload}
+                    valueMode={effectiveValueMode}
+                    useLogScale={false}
+                    censusYears={codeYears.census}
+                  />
+                </PlotErrorBoundary>
               ) : (
                 <Text size="xs" c="dimmed" ta="center" py="sm">
                   No longitudinal data available.
