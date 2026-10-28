@@ -22,6 +22,7 @@ import {
   IconFocus2,
   IconInfoCircle,
   IconLock,
+  IconTimeline,
 } from "@tabler/icons-react";
 import { APP_VERSION, APP_LAST_UPDATED, DATA_LAST_UPDATED, geoDisplayName, geoOptionLabel, seriesColors, COLOR_BRAND, COLOR_BRAND_DARK } from "./config";
 import { faCircleChevronLeft, faCalendar } from "@fortawesome/free-solid-svg-icons";
@@ -38,6 +39,7 @@ import NCPlot from "./NCPlot.jsx";
 import LongitudinalPlot from "./LongitudinalPlot";
 import PlotsTray, { RAIL_DEFAULT_WIDTH, RAIL_MIN_WIDTH, RAIL_MAX_WIDTH } from "./PlotsTray";
 import PlotErrorBoundary from "./PlotErrorBoundary";
+import UnitCard from "./UnitCard";
 import YearCoverage, { AXIS_Y as COVERAGE_AXIS_Y } from "./YearCoverage";
 import { API_BASE, apiFetch } from "./data/edition";
 
@@ -84,15 +86,17 @@ const initialState = {
 // walked with Back/Forward:
 //   y year · l level · g geography · r comparison · t theme · v variable
 //   m value mode (raw|percent) · page (docs|about; absent = map)
+//   card (focal|ref: the unit view is open for that geography)
 // A geosid names a unit only within its year, so g and r are always read
 // together with y. A URL with no parameters keeps the defaults above; one
 // with parameters means exactly what it says (no r = no comparison).
 function viewFromUrl(search) {
   const q = new URLSearchParams(search);
   const page = ["docs", "about"].includes(q.get("page")) ? q.get("page") : "map";
-  if (![...q.keys()].length) return { page };
+  const card = ["focal", "ref"].includes(q.get("card")) ? q.get("card") : null;
+  if (![...q.keys()].length) return { page, card };
   const num = (k) => { const n = Number(q.get(k)); return q.get(k) && Number.isFinite(n) ? n : null; };
-  const view = { page, geosid: q.get("g") || null, refGeosid: q.get("r") || null };
+  const view = { page, card, geosid: q.get("g") || null, refGeosid: q.get("r") || null };
   if (num("y")) view.year = num("y");
   if (num("l") >= 1 && num("l") <= 5) view.level = num("l");
   if (q.get("t")) view.theme = q.get("t");
@@ -101,7 +105,7 @@ function viewFromUrl(search) {
   return view;
 }
 
-function viewToSearch(state, page) {
+function viewToSearch(state, page, card = null) {
   const q = new URLSearchParams();
   if (state.year) q.set("y", state.year);
   if (state.level) q.set("l", state.level);
@@ -112,6 +116,7 @@ function viewToSearch(state, page) {
   if (code) q.set("v", code);
   if (state.valueMode) q.set("m", state.valueMode);
   if (page && page !== "map") q.set("page", page);
+  if (card) q.set("card", card);
   const s = q.toString();
   return s ? `?${s}` : "";
 }
@@ -355,6 +360,8 @@ export default function App() {
   const [searchColOpen, setSearchColOpen] = useState(true);
   const [searchColWidth, setSearchColWidth] = useState(340);
   const [activePage, setActivePage] = useState(INITIAL_VIEW.page);
+  // Unit view (UnitCard): open for the focal or the comparison geography.
+  const [cardFor, setCardFor] = useState(INITIAL_VIEW.card);
   const [showHelpOverlay, setShowHelpOverlay] = useState(false);
 
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
@@ -871,20 +878,21 @@ const changeYear = async (year, { focal } = {}) => {
 // Picking another place or page adds a history entry, so Back returns to it;
 // everything else (year, variable, mode, a lineage swap on a year change)
 // replaces the current entry, so Back is not a walk through every tweak.
-const urlSeenRef = useRef({ geosid: INITIAL_STATE.geosid, year: INITIAL_STATE.year, page: INITIAL_VIEW.page });
+const urlSeenRef = useRef({ geosid: INITIAL_STATE.geosid, year: INITIAL_STATE.year, page: INITIAL_VIEW.page, card: INITIAL_VIEW.card });
 const fromHistoryRef = useRef(false);
 useEffect(() => {
   const seen = urlSeenRef.current;
-  urlSeenRef.current = { geosid: state.geosid, year: state.year, page: activePage };
-  const search = viewToSearch(state, activePage);
+  urlSeenRef.current = { geosid: state.geosid, year: state.year, page: activePage, card: cardFor };
+  const search = viewToSearch(state, activePage, cardFor);
   if (search === window.location.search) { fromHistoryRef.current = false; return; }
   const newPlace = state.geosid !== seen.geosid && state.year === seen.year;
-  const push = !fromHistoryRef.current && (newPlace || activePage !== seen.page);
+  // Opening a card is a step Back should undo; closing one is not.
+  const push = !fromHistoryRef.current && (newPlace || activePage !== seen.page || (cardFor && cardFor !== seen.card));
   fromHistoryRef.current = false;
   const url = `${window.location.pathname}${search}${window.location.hash}`;
   if (push) window.history.pushState(null, "", url); else window.history.replaceState(null, "", url);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- the URL fields are the deps
-}, [state.year, state.level, state.geosid, state.refGeosid, state.theme, state.t_code, state.intendedCode, state.valueMode, activePage]);
+}, [state.year, state.level, state.geosid, state.refGeosid, state.theme, state.t_code, state.intendedCode, state.valueMode, activePage, cardFor]);
 
 // Names for the search boxes when the view came from the URL (first load, or
 // Back/Forward): the entry for each unit IN ITS YEAR (a lineage entry is
@@ -923,6 +931,7 @@ useEffect(() => {
     setYearNotice("");
     dispatch({ type: "hydrate", view });
     setActivePage(view.page);
+    setCardFor(view.card ?? null);
     setLabelRequest((n) => n + 1);
   };
   window.addEventListener("popstate", onPop);
@@ -2263,6 +2272,17 @@ useEffect(() => {
                 >
                   <IconFocus2 size={15} />
                 </ActionIcon>
+                <ActionIcon
+                  size={28}
+                  variant="default"
+                  title="Show this place across census years"
+                  aria-label="Show the primary geography across census years"
+                  disabled={!state.geosid}
+                  onClick={() => setCardFor("focal")}
+                  style={{ borderRadius: 6, flexShrink: 0 }}
+                >
+                  <IconTimeline size={15} />
+                </ActionIcon>
               </div>
             </div>
 
@@ -2323,6 +2343,17 @@ useEffect(() => {
                   }}
                 >
                   <IconFocus2 size={15} />
+                </ActionIcon>
+                <ActionIcon
+                  size={28}
+                  variant="default"
+                  title="Show this place across census years"
+                  aria-label="Show the comparison geography across census years"
+                  disabled={!effectiveRefGeosid}
+                  onClick={() => setCardFor("ref")}
+                  style={{ borderRadius: 6, flexShrink: 0 }}
+                >
+                  <IconTimeline size={15} />
                 </ActionIcon>
               </div>
             </div>
@@ -2646,6 +2677,16 @@ useEffect(() => {
             }
           />
           )}
+
+          <UnitCard
+            opened={Boolean(cardFor && (cardFor === "ref" ? effectiveRefGeosid : state.geosid))}
+            onClose={() => setCardFor(null)}
+            geosid={cardFor === "ref" ? effectiveRefGeosid : state.geosid}
+            year={state.year}
+            level={cardFor === "focal" && levelFor === state.geosid ? state.level : null}
+            accent={seriesColors(colorScheme)[cardFor === "ref" ? "ref" : "focal"]}
+            onJumpYear={(y) => changeYear(y)}
+          />
 
           {showHelpOverlay && (
             <HelpOverlay
