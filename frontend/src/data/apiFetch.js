@@ -9,6 +9,12 @@ import { getApi } from "./engine.js";
 import { trackRequest } from "../pendingRequests";
 
 const abortError = () => new DOMException("The operation was aborted.", "AbortError");
+// One value per key, the first (as the server's query parser does).
+const firstValues = (params) => {
+  const out = {};
+  for (const [k, v] of params) if (!(k in out)) out[k] = v;
+  return out;
+};
 
 export async function apiFetch(input, init = {}) {
   const url = new URL(String(input), window.location.href);
@@ -19,7 +25,7 @@ export async function apiFetch(input, init = {}) {
   if (signal?.aborted) throw abortError();
 
   const work = getApi().then((api) =>
-    api.handle(url.pathname.slice(at), Object.fromEntries(url.searchParams))
+    api.handle(url.pathname.slice(at), firstValues(url.searchParams))
   );
   // Counted until the caller stops waiting: on an abort the query may still
   // run, but nothing on screen depends on it any more.

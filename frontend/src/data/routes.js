@@ -94,6 +94,9 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     }
     for (const [g, years] of HLOOK_YEARS) HLOOK_YEARS.set(g, [...years].sort((a, b) => a - b));
   }
+  // Census years the data knows; other years are refused before any cache
+  // (as in server.js).
+  const CENSUS_YEARS = new Set(HLOOK.map((r) => Number(r.year)));
   // Optional `level` query parameter as a number 1-5, else null.
   const levelParam = (v) => { const n = Number(v); return n >= 1 && n <= 5 ? n : null; };
   // The denominator t_code when a variable can be shown as a percent, else
@@ -420,13 +423,13 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
           .sort((a, b) =>
             a.t_themedescr.localeCompare(b.t_themedescr, "en", {
               sensitivity: "base",
-            })
+            }) || a.t_theme.localeCompare(b.t_theme)
           );
       } else {
         themes = rows.sort((a, b) =>
           a.t_themedescr.localeCompare(b.t_themedescr, "en", {
             sensitivity: "base",
-          })
+          }) || a.t_theme.localeCompare(b.t_theme)
         );
       }
 
@@ -741,6 +744,7 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     if (!year || Number.isNaN(year)) {
       return res.status(400).json({ error: "year is required and must be a number" });
     }
+    if (!CENSUS_YEARS.has(year)) return res.status(404).json({ error: "no census in this year" });
     const code = req.query.level ? LEVEL_CODE[Number(req.query.level)] : null;
     const key = req.query.part ? String(req.query.part) : null;
     if (key && !(code && topologyParts(year, code)[key])) {
@@ -763,6 +767,7 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     if (!year || Number.isNaN(year)) {
       return res.status(400).json({ error: "year is required and must be a number" });
     }
+    if (!CENSUS_YEARS.has(year)) return res.status(404).json({ error: "no census in this year" });
     levelCollection(levelNum, year).then((fc) => res.json(fc)).catch((err) => handleError(res, err));
   });
 
@@ -773,6 +778,8 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     if (!year || Number.isNaN(year)) {
       return res.status(400).json({ error: "year is required" });
     }
+    if (!DATA_TABLE[levelNum]) return res.status(400).json({ error: "valid level (1-5) is required" });
+    if (!CENSUS_YEARS.has(year)) return res.status(404).json({ error: "no census in this year" });
     levelCollection(levelNum, year).then((fc) => res.json(fc)).catch((err) => handleError(res, err));
   });
 
