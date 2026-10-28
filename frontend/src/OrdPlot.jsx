@@ -21,9 +21,9 @@ function OrdPlot({ data }) {
   } = empty ? {} : data;
 
   // coerce to numeric arrays aligned with categories
-  const focalSeries = categories.map((_, i) =>
-  Number.isFinite(Number(focal[i])) ? Number(focal[i]) : 0
-);
+  // A missing value stays null (no bar, "NA" in the tooltip), never 0%.
+  const num = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+  const focalSeries = categories.map((_, i) => num(focal[i]));
 // App passes null when no comparison is selected. It cannot be inferred from
 // the payload: /api/os-plot returns a zero-filled ref array in that case, and
 // zeros are finite, so any value test here would see a real series.
@@ -31,7 +31,7 @@ function OrdPlot({ data }) {
 const BAR_GAP = "20%";
 
 const hasRef =
-  Array.isArray(ref) && ref.some((v) => Number.isFinite(Number(v)));
+  Array.isArray(ref) && ref.some((v) => num(v) != null);
 
 // The chart is rebuilt only when what it draws changes. App passes a fresh
 // `data` object (and so fresh arrays) every render, so depending on them
@@ -41,7 +41,7 @@ const signature = JSON.stringify([categories, focalSeries, hasRef ? ref : null, 
 useEffect(() => {
   const dom = chartRef.current;
   const refSeries = hasRef
-    ? categories.map((_, i) => (Number.isFinite(Number(ref[i])) ? Number(ref[i]) : 0))
+    ? categories.map((_, i) => num(ref[i]))
     : [];
   if (!dom || empty) return;
 
@@ -85,9 +85,8 @@ useEffect(() => {
         formatter: (params) => {
           const head = params[0]?.name ?? "";
           const rows = params.map((p) => {
-            const v = Number(p.value);
-            const vStr = Number.isFinite(v) ? v.toFixed(1) : "NA";
-            return `${p.seriesName}: ${vStr}%`;
+            const v = num(p.value);
+            return `${p.seriesName}: ${v == null ? "NA" : `${v.toFixed(1)}%`}`;
           });
           return `${head}<br/>${rows.join("<br/>")}`;
         },

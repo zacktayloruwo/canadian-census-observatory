@@ -453,7 +453,12 @@ export default function App() {
   // For a lineage entry in a year inside its span the current year's member
   // is looked up; otherwise, for the focal geography, the year moves to the
   // entry's last year so the map shows the place that was picked.
+  // Latest pick per box: a lineage lookup that resolves after a newer pick
+  // in the same box is dropped (review 5.3).
+  const pickSeq = useRef({ focal: 0, ref: 0 });
   const selectSearchEntry = (found, which) => {
+    const seq = ++pickSeq.current[which];
+    const current = () => pickSeq.current[which] === seq;
     const label = geoOptionLabel(found.label, found.geosid);
     const y = Number(stateRef.current.year);
     const inSpan = found.year_max == null || (y >= Number(found.year_min) && y <= Number(found.year_max));
@@ -471,6 +476,7 @@ export default function App() {
     setYearNotice("");
     if (found.geouid && inSpan && y !== Number(found.year_max)) {
       getLineage(found.geosid, found.year_max).then((l) => {
+        if (!current()) return;
         const m = l?.members?.find((x) => Number(x.time) === y);
         apply(m ? m.geosid : found.geosid);
       });
@@ -488,6 +494,7 @@ export default function App() {
       const jump = (geosid) => changeYear(target, { focal: { geosid: String(geosid), label } });
       if (found.geouid && target !== hi) {
         getLineage(found.geosid, hi).then((l) => {
+          if (!current()) return;
           const m = l?.members?.find((x) => Number(x.time) === target);
           jump(m ? m.geosid : found.geosid);
         });
@@ -636,6 +643,9 @@ const [topicOptions, setTopicOptions] = useState([]);
 
 // Fetch themes when level or year changes
 useEffect(() => {
+  // A newer level/year supersedes this request: its answer must not set the
+  // options or move the theme (review 5.3).
+  let cancelled = false;
   async function fetchThemes() {
     if (!state.level || !state.year) {
       setTopicOptions([]);
@@ -658,6 +668,7 @@ useEffect(() => {
 
       // ✅ EXPECT: [{ t_theme, t_themedescr, t_type }, ...]
       const themes = await res.json();
+      if (cancelled) return;
 
       // ✅ Normalize once for consistent frontend shape.
       // Dedupe by t_theme defensively: a duplicate option value makes
@@ -713,6 +724,7 @@ useEffect(() => {
   }
 
   fetchThemes();
+  return () => { cancelled = true; };
 }, [state.level, state.year]);
 
 // Available years for the selected geography (from hlook, independent of theme)
@@ -982,6 +994,7 @@ useEffect(() => {
 
 const [yearOptions, setYearOptions] = useState([]);
 useEffect(() => {
+  let cancelled = false;   // see the themes effect
   async function fetchYears() {
     if (!state.level || !state.theme) {
       setYearOptions([]);
@@ -1003,6 +1016,7 @@ useEffect(() => {
       }
 
       const years = (await res.json()).map(Number); // normalize to numbers
+      if (cancelled) return;
       setYearOptions(years);
 
       // Keep the current year if the theme has it; otherwise move to the
@@ -1020,6 +1034,7 @@ useEffect(() => {
   }
 
   fetchYears();
+  return () => { cancelled = true; };
 }, [state.level, state.theme]);
 
 // The single definition of "which years can I pick" — the Year pulldown and the
@@ -1450,10 +1465,16 @@ useEffect(() => {
     while (sets.size > PART_SETS_KEPT) sets.delete(sets.keys().next().value);
     const store = sets.get(setKey);
     const load = (keys) => Promise.all([...keys].filter((k) => !store.has(k)).map(async (k) => {
-      const r = await apiFetch(`${API_BASE}/api/topology?year=${year}&level=${level}&part=${encodeURIComponent(k)}&v=${DATA_LAST_UPDATED}`);
-      if (!r.ok) return;
-      const topo = await r.json();
-      store.set(k, topojson.feature(topo, topo.objects[objName]).features);
+      // Per part: one failed part must not discard the others' features
+      // (the failure still reaches the load-error banner via apiFetch).
+      try {
+        const r = await apiFetch(`${API_BASE}/api/topology?year=${year}&level=${level}&part=${encodeURIComponent(k)}&v=${DATA_LAST_UPDATED}`);
+        if (!r.ok) return;
+        const topo = await r.json();
+        store.set(k, topojson.feature(topo, topo.objects[objName]).features);
+      } catch (err) {
+        console.error(`[geometry] part ${k} failed:`, err);
+      }
     }));
     const publish = () => {
       const key = `${objName}${store.size}`;
@@ -1782,7 +1803,7 @@ useEffect(() => {
   autoSelectThemeRef.current = state.theme;
 
   const focalNums = osPayload.focal.map((v) =>
-    Number.isFinite(Number(v)) ? Number(v) : -Infinity
+    v != null && Number.isFinite(Number(v)) ? Number(v) : -Infinity
   );
   const maxIdx = focalNums.indexOf(Math.max(...focalNums));
 
@@ -2439,11 +2460,16 @@ useEffect(() => {
             selectedGeosid={mapView?.year === state.year ? state.geosid : null}
             selectedRefGeosid={mapView?.year === state.year ? effectiveRefGeosid : null}
             onSelectGeosid={(geosid, geoname) => {
+              // The layer on screen is still the previous year's while a year
+              // change loads: its codes name units of THAT year (review 5.4).
+              if (mapView?.year !== stateRef.current.year) return;
               dispatch({ type: "setPlace", geosid });
               // Look up the unit's search-list entry so the Select label matches
               // the dropdown format exactly, preventing a search/render cycle.
               findEntryForUnit(geosid, stateRef.current.year)
                 .then(({ matches, found }) => {
+                  // A later click or search has replaced this unit (review 5.3).
+                  if (stateRef.current.geosid !== geosid) return;
                   // No entry for this unit: keep the map's own name.
                   const label = found ? geoOptionLabel(found.label, found.geosid) : (geoname || geosid);
                   if (found) setGeoOptions(matches);
@@ -2451,11 +2477,13 @@ useEffect(() => {
                   setGeoSearch(label);
                 })
                 .catch(() => {
+                  if (stateRef.current.geosid !== geosid) return;
                   setSelectedGeoLabel(geoname || geosid);
                   setGeoSearch("");
                 });
             }}
             onSelectRefGeosid={(geosid, geoname) => {
+              if (mapView?.year !== stateRef.current.year) return;   // see onSelectGeosid
               // Shift+click toggle: re-selecting the current comparison clears it.
               if (state.refGeosid && String(state.refGeosid) === String(geosid)) {
                 clearRef();
@@ -2466,6 +2494,8 @@ useEffect(() => {
               // dropdown-format label so the comparison Select displays it.
               findEntryForUnit(geosid, stateRef.current.year)
                 .then(({ matches, found }) => {
+                  // Cleared or replaced meanwhile: re-dispatching would undo that.
+                  if (stateRef.current.refGeosid !== geosid) return;
                   const label = found ? geoOptionLabel(found.label, found.geosid) : (geoname || geosid);
                   if (found) {
                     setRefGeoOptions(matches);
@@ -2475,6 +2505,7 @@ useEffect(() => {
                   setRefSearch(label);   // see the focal handler: keep Mantine's text in sync
                 })
                 .catch(() => {
+                  if (stateRef.current.refGeosid !== geosid) return;
                   setSelectedRefLabel(geoname || geosid);
                   setRefSearch("");
                 });
