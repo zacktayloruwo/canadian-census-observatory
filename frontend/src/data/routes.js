@@ -1270,8 +1270,10 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
       res.set("Cache-Control", "no-cache");
       res.json({
         categories: merged.map((d) => d.t_name),
-        focal: merged.map((d) => d.focal_pct ?? 0),
-        ref: merged.map((d) => d.ref_pct ?? 0),
+        // null = no data for that category (drawn as no bar, "NA" in the
+        // tooltip); 0 would be read as a real 0% (review 4.4)
+        focal: merged.map((d) => d.focal_pct ?? null),
+        ref: merged.map((d) => d.ref_pct ?? null),
       });
     } catch (err) {
       return handleError(res, err);
