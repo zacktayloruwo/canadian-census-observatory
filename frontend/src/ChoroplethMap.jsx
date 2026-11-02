@@ -619,9 +619,18 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
   // refGeosid).
   hoverCtxRef.current = { values, valueMode, theme, themeLabel, code, codeLabel, ctCmaNames, onSelectGeosid, onSelectRefGeosid };
 
-  // Clear layer registry and any pending hover whenever the GeoJSON remounts
-  useEffect(() => {
+  // Clear the layer registry when the GeoJSON remounts, during render: the new
+  // layer's onEachFeature fills it while this same render's children mount, so
+  // an effect here would run afterwards and empty it, and every restyle pass
+  // below would find no layers to restyle.
+  const registryKeyRef = useRef(mapKey);
+  if (registryKeyRef.current !== mapKey) {
+    registryKeyRef.current = mapKey;
     layersByGeosid.current = {};
+  }
+
+  // Drop any pending hover whenever the GeoJSON remounts
+  useEffect(() => {
     clearTimeout(hoverTimerRef.current);
     setHoverTooltip(null);
   }, [mapKey]);
