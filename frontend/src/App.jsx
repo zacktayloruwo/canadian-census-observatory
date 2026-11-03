@@ -9,12 +9,12 @@
 // State lives in a single useReducer (see `reducer` below).
 // API calls are in individual useEffect hooks, each dependent on the
 // subset of state they need.
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import React, { useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState } from "react";
 import * as topojson from "topojson-client";
 import {
   AppShell, Group, Stack, Title, Text, TextInput,
   Switch, ScrollArea, Divider, ActionIcon, Button, UnstyledButton,
-  Select, SegmentedControl, Anchor,
+  Select, SegmentedControl,
   useMantineColorScheme,
 } from "@mantine/core";
 import {
@@ -37,6 +37,8 @@ import OrdPlot from "./OrdPlot.jsx";
 import NCPlot from "./NCPlot.jsx";
 import LongitudinalPlot from "./LongitudinalPlot";
 import PlotsTray, { RAIL_DEFAULT_WIDTH, RAIL_MIN_WIDTH, RAIL_MAX_WIDTH } from "./PlotsTray";
+import BivariatePlot from "./BivariatePlot";
+import { buildBivariate } from "./bivariate";
 import PlotErrorBoundary from "./PlotErrorBoundary";
 import UnitCard from "./UnitCard";
 import YearCoverage, { AXIS_Y as COVERAGE_AXIS_Y } from "./YearCoverage";
@@ -78,6 +80,14 @@ const initialState = {
 
   refGeosid: null,
   refLabel: "",
+
+  // Bivariate map: the second variable (docs/BIVARIATE-MAP.md). The code is
+  // the user's pick and outlives a year or level that lacks it, like
+  // intendedCode; the map falls back to the first variable alone there.
+  secondOn: false,
+  theme2: null,
+  code2: null,
+  code2Label: "",
 };
 
 // ── URL state ────────────────────────────────────────────────────────────────
@@ -86,6 +96,7 @@ const initialState = {
 //   y year · l level · g geography · r comparison · t theme · v variable
 //   m value mode (raw|percent) · page (docs|about; absent = map)
 //   card (focal|ref: the unit view is open for that geography)
+//   t2, v2 second theme and variable (bivariate map; absent = off)
 // A geosid names a unit only within its year, so g and r are always read
 // together with y. A URL with no parameters keeps the defaults above; one
 // with parameters means exactly what it says (no r = no comparison).
@@ -101,6 +112,8 @@ function viewFromUrl(search) {
   if (q.get("t")) view.theme = q.get("t");
   if (q.get("v")) view.t_code = q.get("v");
   if (["raw", "percent"].includes(q.get("m"))) view.valueMode = q.get("m");
+  view.theme2 = q.get("t2") || null;
+  view.code2 = q.get("v2") || null;
   return view;
 }
 
@@ -114,6 +127,8 @@ function viewToSearch(state, page, card = null) {
   const code = state.intendedCode || state.t_code;   // the user's pick, not a fallback
   if (code) q.set("v", code);
   if (state.valueMode) q.set("m", state.valueMode);
+  if (state.secondOn && state.theme2) q.set("t2", state.theme2);
+  if (state.secondOn && state.code2) q.set("v2", state.code2);
   if (page && page !== "map") q.set("page", page);
   if (card) q.set("card", card);
   const s = q.toString();
@@ -133,6 +148,10 @@ function withView(state, view) {
     Object.assign(next, { intendedCode: view.t_code, intendedLabel: "" });
   }
   if ("refGeosid" in view && view.refGeosid !== state.refGeosid) next.refLabel = "";
+  next.theme2 = view.theme2 ?? null;
+  next.code2 = view.code2 ?? null;
+  next.secondOn = Boolean(next.theme2 || next.code2);
+  if (next.code2 !== state.code2) next.code2Label = "";
   return next;
 }
 
@@ -212,6 +231,12 @@ function reducer(state, action) {
         codeLevel: action.codeLevel ?? null,
         ...(action.intended ? { intendedCode: action.t_code, intendedLabel: action.codeLabel ?? "" } : {}),
       };
+    case "setSecondOn":
+      return { ...state, secondOn: action.on };
+    case "setTheme2":
+      return { ...state, theme2: action.theme, code2: null, code2Label: "" };
+    case "setCode2":
+      return { ...state, code2: action.code, code2Label: action.label ?? "" };
     case "setValueMode":
       return {
         ...state,
@@ -233,21 +258,6 @@ function reducer(state, action) {
       return state;
   }
 }
-
-// Try multiple possible key names so this works regardless of how topicOptions is shaped
-function findThemeMeta(theme, topicOptions) {
-  if (!theme || !Array.isArray(topicOptions)) return null;
-
-  return (
-    topicOptions.find(
-      (opt) =>
-        opt.t_theme === theme ||   // backend shape: { t_theme, t_themedescr, t_type }
-        opt.value === theme ||     // mapped shape: { value, label, t_type }
-        opt.theme === theme        // just in case we named it "theme"
-    ) || null
-  );
-}
-
 
 function ResizeHandle({ side, currentWidth, onResize, onCollapse, minWidth = 180, maxWidth = 560 }) {
   const [hovered, setHovered] = useState(false);
@@ -303,6 +313,13 @@ function ResizeHandle({ side, currentWidth, onResize, onCollapse, minWidth = 180
   );
 }
 
+const TOPO_OBJECT_BY_LEVEL = { 1: "ct", 2: "csd", 3: "cd", 4: "cma", 5: "pr" };
+function expandTopologyLevel(topo, level) {
+  const objName = TOPO_OBJECT_BY_LEVEL[level];
+  if (!topo || !objName || !topo.objects || !topo.objects[objName]) return null;
+  return topojson.feature(topo, topo.objects[objName]);
+}
+
 export default function App() {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   // Live mirror of `state` for async effects: a fetch that resolves after a
@@ -341,13 +358,6 @@ export default function App() {
   // GeoJSON Feature for the selected reference geography, fetched individually
   // so it can be displayed at any level regardless of the current map layer.
   const [refPolygon, setRefPolygon] = useState(null);
-
-  // For /api/ping
-  const [pingResult, setPingResult] = useState(null);
-  const [pingLoading, setPingLoading] = useState(false);
-
-  // Derived label for level (once we start setting it)
-  const levelStr = state.level ? LEVEL_LABEL[state.level] ?? null : null;
 
   // For plot_cat
   const [csPayload, setCsPayload] = useState(null);
@@ -403,6 +413,8 @@ export default function App() {
   const helpDisplayOptsRef   = useRef(null);
   const helpMapRef           = useRef(null);
   const helpLegendRef        = useRef(null);
+  const helpSecondRef        = useRef(null);
+  const helpBivariateRef     = useRef(null);
 
   // The help overlay only makes sense on the map page — close it if the
   // user navigates away while it's open.
@@ -697,20 +709,21 @@ useEffect(() => {
       const availableThemes = opts.map((t) => t.value);
 
       // ✅ Pick theme to use (keep current if still valid)
+      const currentTheme = stateRef.current.theme;
       const newTheme =
-        state.theme && availableThemes.includes(state.theme)
-          ? state.theme
+        currentTheme && availableThemes.includes(currentTheme)
+          ? currentTheme
           : availableThemes.length > 0
           ? availableThemes[0]
           : null;
 
       // A theme from the URL is valid but has no label yet.
-      if (newTheme === state.theme && newTheme != null && !stateRef.current.themeLabel) {
+      if (newTheme === currentTheme && newTheme != null && !stateRef.current.themeLabel) {
         const selected = opts.find((t) => t.value === newTheme);
         dispatch({ type: "setThemeMeta", themeLabel: selected?.label ?? newTheme, themeType: selected?.t_type ?? null });
       }
 
-      if (newTheme !== state.theme && newTheme != null) {
+      if (newTheme !== currentTheme && newTheme != null) {
         const selected = opts.find((t) => t.value === newTheme);
         const themeLabel = selected?.label ?? newTheme;
         const themeType  = selected?.t_type ?? null;
@@ -891,7 +904,7 @@ useEffect(() => {
   const url = `${window.location.pathname}${search}${window.location.hash}`;
   if (push) window.history.pushState(null, "", url); else window.history.replaceState(null, "", url);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- the URL fields are the deps
-}, [state.year, state.level, state.geosid, state.refGeosid, state.theme, state.t_code, state.intendedCode, state.valueMode, activePage, cardFor]);
+}, [state.year, state.level, state.geosid, state.refGeosid, state.theme, state.t_code, state.intendedCode, state.valueMode, state.secondOn, state.theme2, state.code2, activePage, cardFor]);
 
 // Names for the search boxes when the view came from the URL (first load, or
 // Back/Forward): the entry for each unit IN ITS YEAR (a lineage entry is
@@ -938,6 +951,11 @@ useEffect(() => {
 }, []);
 
 const [geoYears, setGeoYears] = useState([]);
+const currentFocalLevel = useEffectEvent((geosid) => focalLevel(geosid));
+const adoptGeoYears = useEffectEvent((years) => {
+  setGeoYears(years);
+  if (years.length > 0 && !years.includes(Number(state.year))) changeYear(Math.max(...years));
+});
 useEffect(() => {
   if (!state.geosid) { setGeoYears([]); return; }
   // Anchor on the year in force when the geography was chosen: the server
@@ -948,11 +966,9 @@ useEffect(() => {
   // still holds the previous geography's level until /api/level answers);
   // without it the server reads the unit's level from hlook.
   let cancelled = false;
-  fetchGeoYears(state.geosid, anchorYear, focalLevel(state.geosid))
+  fetchGeoYears(state.geosid, anchorYear, currentFocalLevel(state.geosid))
     .then(years => {
-      if (cancelled) return;
-      setGeoYears(years);
-      if (years.length > 0 && !years.includes(Number(state.year))) changeYear(Math.max(...years));
+      if (!cancelled) adoptGeoYears(years);
     });
   return () => { cancelled = true; };
   // state.year is a dependency on purpose: picking an entry that reuses the
@@ -1000,7 +1016,57 @@ useEffect(() => {
   return () => controller.abort();
 }, [state.t_code, state.year]);
 
+// The second variable's options and years, keyed so a stale answer is never
+// read as the current one. Its years narrow availableYears below.
+// The bivariate view needs Display options on Percent. The choice of second
+// variable stays in state, so switching back to Percent restores it.
+const secondAllowed = effectiveValueMode === "percent";
+const secondActive = state.secondOn && secondAllowed;
+const secondCode = secondActive ? state.code2 : null;
+const code2Key = secondActive && state.level && state.year && state.theme2 ? `${state.level}|${state.year}|${state.theme2}` : null;
+const [code2Result, setCode2Result] = useState({ key: null, options: [] });
+const code2Options = useMemo(() => (code2Result.key === code2Key ? code2Result.options : []), [code2Result, code2Key]);
+useEffect(() => {
+  if (!code2Key) return;
+  const controller = new AbortController();
+  const url = new URL(`${API_BASE}/api/codes`);
+  url.searchParams.set("level", String(state.level));
+  url.searchParams.set("year", String(state.year));
+  url.searchParams.set("t_theme", state.theme2);
+  apiFetch(url.toString(), { signal: controller.signal })
+    .then((r) => (r.ok ? r.json() : []))
+    .then((d) => setCode2Result({ key: code2Key, options: d ?? [] }))
+    .catch((err) => { if (err.name !== "AbortError") { console.error("[codes2]", err); setCode2Result({ key: code2Key, options: [] }); } });
+  return () => controller.abort();
+}, [code2Key, state.level, state.year, state.theme2]);
+
+const [code2Years, setCode2Years] = useState({ key: null, available: [] });
+useEffect(() => {
+  if (!state.level || !secondCode) return;
+  const key = `${state.level}|${secondCode}`;
+  const controller = new AbortController();
+  const url = new URL(`${API_BASE}/api/code-years`);
+  url.searchParams.set("level", String(state.level));
+  url.searchParams.set("t_code", secondCode);
+  apiFetch(url, { signal: controller.signal })
+    .then((r) => (r.ok ? r.json() : { available: [] }))
+    .then((d) => setCode2Years({ key, available: d.available ?? [] }))
+    .catch((err) => { if (err.name !== "AbortError") console.error("[code-years2]", err); });
+  return () => controller.abort();
+}, [state.level, secondCode]);
+
 const [yearOptions, setYearOptions] = useState([]);
+// Keep the current year if the theme has it; otherwise move to the latest year
+// that has both the theme AND the selected place, through changeYear so the
+// selections follow their lineage.
+const followThemeYears = useEffectEvent((years) => {
+  if (years.length > 0 && !years.includes(Number(state.year))) {
+    const geoSet = new Set(geoYears.map(Number));
+    const both = years.filter((y) => geoSet.has(y));
+    changeYear(Math.max(...(both.length ? both : years)));
+  }
+});
+
 useEffect(() => {
   let cancelled = false;   // see the themes effect
   async function fetchYears() {
@@ -1027,14 +1093,7 @@ useEffect(() => {
       if (cancelled) return;
       setYearOptions(years);
 
-      // Keep the current year if the theme has it; otherwise move to the
-      // latest year that has both the theme AND the selected place, through
-      // changeYear so the selections follow their lineage.
-      if (years.length > 0 && !years.includes(Number(state.year))) {
-        const geoSet = new Set(geoYears.map(Number));
-        const both = years.filter((y) => geoSet.has(y));
-        changeYear(Math.max(...(both.length ? both : years)));
-      }
+      followThemeYears(years);
     } catch (err) {
       console.error("Error fetching years:", err);
       setYearOptions([]);
@@ -1074,8 +1133,13 @@ const availableYears = useMemo(() => {
     const narrowed = years.filter(y => codeSet.has(y));
     if (narrowed.length > 0) years = narrowed;
   }
+  if (secondCode && code2Years.key === `${state.level}|${secondCode}` && code2Years.available.length > 0) {
+    const set2 = new Set(code2Years.available.map(Number));
+    const narrowed = years.filter(y => set2.has(y));
+    if (narrowed.length > 0) years = narrowed;
+  }
   return years;
-}, [themeYears, codeYears]);
+}, [themeYears, codeYears, secondCode, code2Years, state.level]);
 const availableYearSet = useMemo(() => new Set(availableYears), [availableYears]);
 
 // One line of plain text under the closed Year field, so the coverage fact is
@@ -1103,8 +1167,8 @@ const coverageSummary = useMemo(() => {
   const span = availableYears.length === 1
     ? `${availableYears[0]}`
     : `${availableYears[0]}\u2013${availableYears[availableYears.length - 1]}`;
-  return `${availableYears.length} of ${census.length} census years carry this variable (${span}).`;
-}, [codeYears, availableYears]);
+  return `${availableYears.length} of ${census.length} census years carry ${secondCode ? "both variables" : "this variable"} (${span}).`;
+}, [codeYears, availableYears, secondCode]);
 
 const [codeOptions, setCodeOptions] = useState([]);
 // True from the moment a codes fetch starts until it settles. While it is
@@ -1267,13 +1331,6 @@ const GEOMETRY_CLIENT_CACHE_MAX = 6;
 // bundle 404'd — those years fall back to /api/geometry permanently.
 const topologyCacheRef = useRef(new Map());                   // year → Topology | null
 const TOPOLOGY_CLIENT_CACHE_MAX = 4;
-const TOPO_OBJECT_BY_LEVEL = { 1: "ct", 2: "csd", 3: "cd", 4: "cma", 5: "pr" };
-
-function expandTopologyLevel(topo, level) {
-  const objName = TOPO_OBJECT_BY_LEVEL[level];
-  if (!topo || !objName || !topo.objects || !topo.objects[objName]) return null;
-  return topojson.feature(topo, topo.objects[objName]);
-}
 
 // --- Fine levels, loaded by area -------------------------------------------------
 // Census tract boundaries ship as one TopoJSON file per CMA, CSDs and CDs as
@@ -1354,6 +1411,9 @@ useEffect(() => {
   return () => ac.abort();
 }, [state.level, state.year]);
 
+const showingGeometry = useEffectEvent((level, year) => (
+  geometryPayload && geometryPayload.level === level && geometryPayload.year === year
+));
 useEffect(() => {
   // The levelFor guard only matters while a selected geography's level is
   // still resolving; with no geography selected (geosid null) the map should
@@ -1363,7 +1423,7 @@ useEffect(() => {
 
   const key = `${state.level}|${state.year}`;
   // Already showing this level/year — nothing to do.
-  if (geometryPayload && geometryPayload.level === state.level && geometryPayload.year === state.year) {
+  if (showingGeometry(state.level, state.year)) {
     return;
   }
   const cached = geometryCacheRef.current.get(key);
@@ -1452,6 +1512,7 @@ const provincesFC = useMemo(() => {
   return topo ? expandTopologyLevel(topo, 5) : null;
   // geometryPayload dependency: the cache ref isn't reactive; geometry
   // resolution is the signal that the year's bundle (or its absence) is known.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [state.year, geometryPayload]);
 
 // Area loader: fetch the parts of a split level the view (and the selected
@@ -1510,6 +1571,9 @@ useEffect(() => {
   return () => { cancelled = true; };
 }, [state.level, state.year, state.geosid, levelFor, effectiveRefGeosid, viewport]);
 
+const showingValues = useEffectEvent((level, year, code) => (
+  valuesPayload && valuesPayload.level === level && valuesPayload.year === year && valuesPayload.code === code
+));
 useEffect(() => {
   if (!state.level || !state.t_code || !state.year) {
     setValuesPayload(null);
@@ -1521,12 +1585,7 @@ useEffect(() => {
   if (state.geosid && levelFor !== state.geosid) return;
   // Values depend only on (level, year, t_code) — a same-level geography
   // change needs no refetch at all.
-  if (
-    valuesPayload &&
-    valuesPayload.level === state.level &&
-    valuesPayload.year === state.year &&
-    valuesPayload.code === state.t_code
-  ) {
+  if (showingValues(state.level, state.year, state.t_code)) {
     return;
   }
 
@@ -1562,6 +1621,28 @@ useEffect(() => {
   return () => controller.abort();
 }, [state.level, state.year, state.t_code, state.geosid, levelFor]);
 
+// The second variable's values, on the first's conditions. A failed fetch still
+// lands as a payload so the map falls back instead of waiting for it forever.
+const [values2Payload, setValues2Payload] = useState(null);
+useEffect(() => {
+  if (!state.level || !state.year || !secondCode) return;
+  if (state.geosid && levelFor !== state.geosid) return;
+  const landed = { level: state.level, year: state.year, code: secondCode };
+  const controller = new AbortController();
+  const url = new URL(`${API_BASE}/api/values`);
+  url.searchParams.set("level", String(state.level));
+  url.searchParams.set("year", String(state.year));
+  url.searchParams.set("t_code", secondCode);
+  apiFetch(url, { signal: controller.signal })
+    .then(async (res) => {
+      if (!res.ok) return setValues2Payload({ ...landed, rows: [], failed: true });
+      const data = await res.json();
+      setValues2Payload({ ...landed, rows: data.rows ?? [], t_denom: data.t_denom ?? null });
+    })
+    .catch((err) => { if (err.name !== "AbortError") setValues2Payload({ ...landed, rows: [], failed: true }); });
+  return () => controller.abort();
+}, [state.level, state.year, secondCode, state.geosid, levelFor]);
+
 // Displayed value per geosid, derived locally.  The percent/absolute toggle
 // (and any future transform) is pure client-side math over raw + denominator —
 // no network round trip, no layer rebuild.
@@ -1584,17 +1665,39 @@ const displayValues = useMemo(() => {
   return m;
 }, [valuesPayload, effectiveValueMode]);
 
+// One Percent toggle for both variables; each uses it if it can be a percent.
+const yPercent = state.valueMode === "percent" && !!values2Payload?.t_denom;
+const xPercent = effectiveValueMode === "percent" && !!valuesPayload?.t_denom;
+const display2Values = useMemo(() => {
+  if (!values2Payload) return null;
+  const m = new Map();
+  for (const r of values2Payload.rows) {
+    const raw = r.raw_value != null ? Number(r.raw_value) : null;
+    const denom = r.denom_value != null ? Number(r.denom_value) : null;
+    m.set(String(r.geosid), yPercent ? (raw != null && denom ? (raw * 100) / denom : null) : raw);
+  }
+  return m;
+}, [values2Payload, yPercent]);
+
 // Atomic map view: geometry and values are committed to the map TOGETHER,
 // and only when they describe the same (level, year).  While a level or year
 // change is in flight the previous consistent pair stays on screen, so the
 // map never paints a freshly mounted layer with no values (the "no data"
 // flash) — it swaps once, fully colored, when both pieces are ready.
 const mapViewRef = useRef(null);
+const wantSecond = Boolean(secondCode && secondCode !== state.t_code);
+const secondReady = !wantSecond || Boolean(
+  values2Payload && display2Values &&
+  values2Payload.code === secondCode &&
+  values2Payload.level === state.level &&
+  values2Payload.year === state.year
+);
 const mapView = useMemo(() => {
   if (
     geometryPayload &&
     valuesPayload &&
     displayValues &&
+    secondReady &&
     geometryPayload.level === valuesPayload.level &&
     geometryPayload.year === valuesPayload.year
   ) {
@@ -1602,12 +1705,43 @@ const mapView = useMemo(() => {
       geometry: geometryPayload.fc,
       geometryKey: geometryPayload.key ?? "",
       values: displayValues,
+      values2: wantSecond ? display2Values : null,
+      bivariate: wantSecond ? buildBivariate(displayValues, display2Values, 4) : null,
+      secondFailed: wantSecond && Boolean(values2Payload?.failed),
       level: geometryPayload.level,
       year: geometryPayload.year,
     };
   }
   return mapViewRef.current;
-}, [geometryPayload, valuesPayload, displayValues]);
+}, [geometryPayload, valuesPayload, displayValues, secondReady, wantSecond, display2Values, values2Payload]);
+const mapBivariate = mapView?.bivariate?.usable ? mapView.bivariate : null;
+const [biCell, setBiCell] = useState(null);   // legend cell in focus: { i, j } | null
+
+// A pick from the URL has no label until a list carries it; once one has, the
+// label is kept for the years that lack the variable.
+const code2Listed = code2Options.find((c) => c.t_code === state.code2)?.t_name;
+useEffect(() => {
+  if (code2Listed && code2Listed !== state.code2Label) dispatch({ type: "setCode2", code: state.code2, label: code2Listed });
+}, [code2Listed, state.code2, state.code2Label]);
+const code2Name = code2Listed ?? (state.code2Label || "the second variable");
+const firstName = state.codeLabel || state.t_code || "the first variable";
+// Why the map is showing one variable although a second is chosen, if it is.
+const secondNotice = (() => {
+  if (!secondCode) return null;
+  if (secondCode === state.t_code) return "Choose a different second variable: this is the same as the first.";
+  const b = mapView?.bivariate;
+  if (mapView?.secondFailed) return `Couldn't load ${code2Name}. Showing ${firstName} alone.`;
+  if (!b || b.usable) return null;
+  if (b.reason === "empty") return `${code2Name[0].toUpperCase()}${code2Name.slice(1)} is not tabulated for ${LEVEL_NAME[state.level]} in ${state.year}. Showing ${firstName} alone until a year that carries it.`;
+  const who = b.unusable === "first" ? firstName : b.unusable === "second" ? code2Name : "These variables";
+  return `${who}: too few places differ to compare. Showing ${firstName} alone.`;
+})();
+const sameThemeNote = secondCode && state.theme2 === state.theme && state.themeType !== "nc"
+  ? "Two categories of one total are partly related by construction."
+  : null;
+const rawCountNote = mapBivariate && ((valuesPayload?.t_denom && !xPercent) || (values2Payload?.t_denom && !yPercent))
+  ? "Raw counts mostly reflect population size."
+  : null;
 
 // Rows for the non-count histogram (NCPlot): geoname from geometry properties,
 // value from the local join.  Derived from the committed map view so the
@@ -1782,7 +1916,7 @@ useEffect(() => {
 
 // Auto-select the variable with the highest focal value — categorical themes.
 // csPayload.categories includes t_code + focal_pct per category.
-useEffect(() => {
+const autoSelectFromCs = useEffectEvent(() => {
   if (!csPayload?.categories?.length) return;
   if (autoSelectThemeRef.current === state.theme) return;
   autoSelectThemeRef.current = state.theme;
@@ -1800,11 +1934,12 @@ useEffect(() => {
       codeLevel: found?.t_level ?? null,
     });
   }
-}, [csPayload]);
+});
+useEffect(() => { autoSelectFromCs(); }, [csPayload]);
 
 // Auto-select the variable with the highest focal value — ordinal themes.
 // osPayload.categories contains t_name labels; match back via codeOptions.
-useEffect(() => {
+const autoSelectFromOs = useEffectEvent(() => {
   if (!osPayload?.focal?.length) return;
   if (!codeOptions?.length) return;
   if (autoSelectThemeRef.current === state.theme) return;
@@ -1827,7 +1962,8 @@ useEffect(() => {
       });
     }
   }
-}, [osPayload, codeOptions]);
+});
+useEffect(() => { autoSelectFromOs(); }, [osPayload, codeOptions]);
 
 // NOTE: valueMode is no longer force-normalized when the variable's nc-ness
 // changes.  state.valueMode holds the user's preference; effectiveValueMode
@@ -1957,29 +2093,12 @@ useEffect(() => {
   if (import.meta.env.DEV) {
     window.appDebug = { state, topicOptions, csPayload, osPayload };
   }
-}, [state, topicOptions]);
+}, [state, topicOptions, csPayload, osPayload]);
 
 
 
 
 
-
-  // --- 4. Ping DB button handler ---
-  async function handlePing() {
-    setPingLoading(true);
-    setPingResult(null);
-    try {
-      const res = await apiFetch(`${API_BASE}/api/ping`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setPingResult(data);
-    } catch (err) {
-      console.error(err);
-      setPingResult({ error: err.message });
-    } finally {
-      setPingLoading(false);
-    }
-  }
 
   return (
     <AppShell
@@ -2016,11 +2135,6 @@ useEffect(() => {
               size="xs"
               onClick={() => setActivePage("map")}
             >Map</Button>
-            <Button
-              variant={activePage === "docs" ? "filled" : "subtle"}
-              size="xs"
-              onClick={() => setActivePage("docs")}
-            >Documentation</Button>
             <Button
               variant={activePage === "about" ? "filled" : "subtle"}
               size="xs"
@@ -2096,7 +2210,7 @@ useEffect(() => {
               <Select
                 label="Variable"
                 size="xs"
-                mt="xs"
+                mt={4}
                 searchable
                 allowDeselect={false}
                 value={state.t_code || null}
@@ -2125,6 +2239,65 @@ useEffect(() => {
                   {state.intendedLabel} is not tabulated for {LEVEL_NAME[state.level]} in {state.year}.
                   Showing {state.codeLabel} until a year that carries it is selected.
                 </Text>
+              )}
+
+              <div ref={helpSecondRef} style={{ marginTop: "var(--mantine-spacing-xs)" }}>
+              <Switch
+                size="xs"
+                label="Compare with a second variable"
+                withThumbIndicator={false}
+                checked={secondActive}
+                disabled={!secondAllowed}
+                onChange={(e) => { setBiCell(null); dispatch({ type: "setSecondOn", on: e.currentTarget.checked }); }}
+              />
+              </div>
+              {!secondAllowed && (
+                <Text size="xs" c="dimmed" mt={4}>
+                  {isNonCountVariable
+                    ? "Comparing needs a variable that can be shown as a percent."
+                    : "Comparing needs Display options set to Percent."}
+                </Text>
+              )}
+              {secondActive && (
+                <div style={{ borderLeft: "2px solid var(--mantine-color-blue-6)", paddingLeft: 8, marginTop: 6 }}>
+                  <Select
+                    label="Second theme"
+                    size="xs"
+                    searchable
+                    value={state.theme2}
+                    onChange={(value) => { if (value) { setBiCell(null); dispatch({ type: "setTheme2", theme: value }); } }}
+                    data={topicOptions.map((opt) => ({ value: opt.value, label: opt.label }))}
+                    placeholder="Select theme…"
+                    nothingFoundMessage="No themes found"
+                  />
+                  <Select
+                    label="Second variable"
+                    size="xs"
+                    mt={4}
+                    searchable
+                    allowDeselect={false}
+                    value={state.code2}
+                    onChange={(value) => {
+                      if (!value) return;
+                      setBiCell(null);
+                      dispatch({ type: "setCode2", code: value, label: code2Options.find((c) => c.t_code === value)?.t_name ?? value });
+                    }}
+                    data={[
+                      ...code2Options
+                        .filter((c) => c.t_code !== state.t_code)
+                        .sort((a, b) => (a.t_name ?? a.t_code).localeCompare(b.t_name ?? b.t_code, "en", { sensitivity: "base" }))
+                        .map((c) => ({ value: c.t_code, label: c.t_name ?? c.t_code })),
+                      // Kept selectable where this year lacks it, so the field still names the pick.
+                      ...(state.code2 && !code2Options.some((c) => c.t_code === state.code2)
+                        ? [{ value: state.code2, label: state.code2Label || state.code2 }] : []),
+                    ]}
+                    placeholder={state.theme2 ? "Select variable…" : "Select theme first"}
+                    disabled={!state.theme2}
+                    nothingFoundMessage="No variables found"
+                  />
+                  {secondNotice && <Text size="xs" c="dimmed" mt={4}>{secondNotice}</Text>}
+                  {sameThemeNote && !secondNotice && <Text size="xs" c="dimmed" mt={4}>{sameThemeNote}</Text>}
+                </div>
               )}
 
               {/* Level sits between Variable and Year: the year list depends on
@@ -2422,25 +2595,14 @@ useEffect(() => {
         </AppShell.Section>
 
         {/* Panel foot — reclaims the 22px footer bar the app used to spend on
-            three rarely-read strings. The basemap credit lives here too; see
-            the map's fallback credit for what happens when this panel is
-            collapsed (ODbL and CARTO both require the attribution to remain
-            visible, so it can never simply disappear). */}
+            rarely-read strings. Full credits are on the About page; the basemap
+            credit stays on the map, since ODbL and CARTO both require it to
+            remain visible. */}
         <AppShell.Section>
           <Divider mb={8} />
           <Text c="dimmed" style={{ fontSize: 9, lineHeight: 1.45 }}>
             App {APP_VERSION} · updated {APP_LAST_UPDATED}<br />
-            Census data updated {DATA_LAST_UPDATED}<br />
-            Base map ©{" "}
-            <Anchor c="dimmed" underline="always" style={{ fontSize: 9 }} href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</Anchor>
-            {" "}contributors, ©{" "}
-            <Anchor c="dimmed" underline="always" style={{ fontSize: 9 }} href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</Anchor>
-            {" · "}
-            <Anchor c="dimmed" underline="always" style={{ fontSize: 9 }} href="https://leafletjs.com/" target="_blank" rel="noreferrer">Leaflet</Anchor>
-            <br />
-            Historical boundaries 1851–1941 after{" "}
-            <Anchor c="dimmed" underline="always" style={{ fontSize: 9 }} href="https://doi.org/10.5683/SP2/IQ7E0X" target="_blank" rel="noreferrer">Historical Atlas of Canada, Territorial Evolution</Anchor>
-            {" "}(CC BY-NC 4.0)
+            Census data updated {DATA_LAST_UPDATED}
           </Text>
         </AppShell.Section>
       </AppShell.Navbar>
@@ -2468,6 +2630,14 @@ useEffect(() => {
             onViewportChange={handleViewport}
             onSelectionSettled={handleSelectionSettled}
             values={mapView?.values ?? null}
+            values2={mapBivariate ? mapView.values2 : null}
+            bivariate={mapBivariate}
+            secondLabel={code2Name}
+            xPercent={xPercent}
+            yPercent={yPercent}
+            rawCountNote={rawCountNote}
+            highlightCell={mapBivariate ? biCell : null}
+            onHighlightCell={setBiCell}
             level={mapView?.level ?? null}
             year={mapView?.year ?? null}
             provincesFC={provincesFC}
@@ -2480,7 +2650,6 @@ useEffect(() => {
             useLogScale={logForNc}
             showBasemap={showBasemap}
             layoutKey={`${searchColOpen}-${searchColWidth}-${plotsOpen}-${effectivePlotsWidth}`}
-            showAttribution={!searchColOpen}
             selectorsOpen={searchColOpen}
             plotsOpen={plotsOpen}
             onOpenSelectors={() => setSearchColOpen(true)}
@@ -2662,6 +2831,25 @@ useEffect(() => {
                 )}
               </PlotErrorBoundary>
             }
+            relationship={mapBivariate ? (
+              <div ref={helpBivariateRef}>
+              <PlotErrorBoundary resetKey={`${plotResetKey}|${secondCode}`}>
+                <BivariatePlot
+                  bivariate={mapBivariate}
+                  geometry={mapView.geometry}
+                  xLabel={firstName}
+                  yLabel={code2Name}
+                  xPercent={xPercent}
+                  yPercent={yPercent}
+                  focalGeosid={state.geosid}
+                  refGeosid={effectiveRefGeosid}
+                  highlightCell={biCell}
+                  onHighlightCell={setBiCell}
+                  note={rawCountNote}
+                />
+              </PlotErrorBoundary>
+              </div>
+            ) : null}
             overTime={
               seriesPayload?.focal?.series?.length > 1 ? (
                 <PlotErrorBoundary resetKey={plotResetKey}>
@@ -2709,6 +2897,7 @@ useEffect(() => {
                 { ref: helpMapRef, title: "The map", text: "Shows the selected variable across the map's geographies, shaded by value. Click a geography to select it." },
                 { ref: helpLegendRef, title: "Legend", text: "Shows how map shading maps to values, and how areas with no data are marked." },
                 { ref: plotsTrayRef, title: "Plots", text: "The profile of the selected geography and its change over census years, side by side. Collapse the tray with the chevron to give the map its full height back." },
+                { ref: mapBivariate && plotsOpen ? helpBivariateRef : helpSecondRef, calloutHeight: 300, title: "Bivariate view", text: "\"Compare with a second variable\" colours the map by two variables at once. Each is split into four classes at its quartiles, giving 16 colours: teal deepens as the first variable rises, purple as the second rises, and dark means both are high. The plot in the right bar shows one dot per place over those colours, with white lines at the quartiles and a red line of best fit. Hover a band to find its places on the map. Correlations describe places, not individuals. Available when Display options is set to Percent." },
               ]}
               onClose={() => setShowHelpOverlay(false)}
             />

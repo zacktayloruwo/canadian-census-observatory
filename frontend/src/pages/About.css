@@ -1,0 +1,64 @@
+/* The About page's type, matched to the app: the top bar's Lora title and dimmed
+   sans-serif name, then Mantine's sans-serif, text colours and bold section heads.
+   Colours are Mantine's variables or the brand colours About.jsx passes in, so
+   light and dark modes both follow the app. */
+
+/* The app's page body doesn't scroll, so this does. */
+.about-page {
+  height: calc(100vh - var(--app-shell-header-height) - var(--app-shell-footer-height, 0px));
+  overflow-y: auto;
+  padding: 48px 16px 64px;
+  color: var(--mantine-color-text);
+  font-family: var(--mantine-font-family);
+}
+
+.about-content {
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+.about-title {
+  text-align: center;
+  margin-bottom: 40px;
+}
+
+.about-title-mark {
+  margin: 0;
+  font-family: "Lora", Georgia, "Times New Roman", serif;
+  font-weight: 700;
+  font-size: 3.5rem;
+  line-height: 1.15;
+  letter-spacing: 0.02em;
+  color: light-dark(var(--about-brand-light), var(--about-brand-dark));
+}
+
+.about-title-name {
+  margin: 4px 0 0;
+  font-size: 1.375rem;
+  line-height: 1.3;
+  color: var(--mantine-color-dimmed);
+}
+
+.about-intro {
+  margin: 0 0 40px;
+  font-size: 1.375rem;
+  line-height: 1.5;
+}
+
+.about-content h2 {
+  margin: 36px 0 8px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.about-content section p {
+  margin: 0 0 12px;
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+.about-content a {
+  color: var(--mantine-color-anchor);
+  text-decoration: underline;
+}

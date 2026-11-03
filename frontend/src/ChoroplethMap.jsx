@@ -1,10 +1,12 @@
 // src/ChoroplethMap.jsx
-import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, forwardRef } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, forwardRef } from "react";
 import L from "leaflet";
 import { MapContainer, TileLayer, GeoJSON, useMap, useMapEvents, Pane, ZoomControl } from "react-leaflet";
 import { useMantineColorScheme } from "@mantine/core";
 import { faCanadianMapleLeaf } from "@fortawesome/free-brands-svg-icons";
 import { faChartSimple, faFilter } from "@fortawesome/free-solid-svg-icons";
+import BivariateLegend from "./BivariateLegend";
+import { classNames } from "./bivariate";
 import { COLOR_FOCAL, COLOR_REF, COLOR_PROVINCE_BOUNDARY, HOVER_POPUP_DELAY_MS, COLOR_BRAND, CARTO_KEY, cartoTileUrl, DATA_LAST_UPDATED } from "./config";
 import { API_BASE, apiFetch } from "./data/edition";
 import DataLoadingIndicator from "./DataLoadingIndicator";
@@ -155,7 +157,7 @@ function rgbToHex(r, g, b) {
 
 function MapInit({ mapRef }) {
   const map = useMap();
-  useEffect(() => { mapRef.current = map; }, [map]);
+  useEffect(() => { mapRef.current = map; }, [map, mapRef]);
   return null;
 }
 
@@ -242,7 +244,7 @@ const STYLE_PROVINCE = () => ({
 function IconControl({ icon, title, position, onClick }) {
   const map = useMap();
   const onClickRef = useRef(onClick);
-  onClickRef.current = onClick;
+  useEffect(() => { onClickRef.current = onClick; }, [onClick]);
 
   useEffect(() => {
     const Ctl = L.Control.extend({
@@ -271,7 +273,23 @@ function IconControl({ icon, title, position, onClick }) {
   return null;
 }
 
+// --- Choropleth layer --------------------------------------------------------
+
+// react-leaflet restyles every feature whenever `style` changes identity, so
+// passing a new function each render repainted the whole choropleth (each search
+// keystroke, each hover tooltip). This keeps the function it mounted with: new
+// layers style through it, and value, palette and selection changes restyle
+// through the effects in ChoroplethMap.
+function ChoroplethLayer({ style, ...props }) {
+  const [mountStyle] = useState(() => style);
+  return <GeoJSON {...props} style={mountStyle} />;
+}
+
 // --- National zoom button ----------------------------------------------------
+
+// Module constants, so the control's effect doesn't re-add it on every render.
+const NATIONAL_CENTER = [57, -96];
+const NATIONAL_ZOOM = 4;
 
 function ZoomToNational({ center, zoom }) {
   const map = useMap();
@@ -311,7 +329,7 @@ function ZoomToNational({ center, zoom }) {
     const ctrl = new NationalControl({ position: "topright" });
     ctrl.addTo(map);
     return () => ctrl.remove();
-  }, [map]);
+  }, [map, center, zoom]);
 
   return null;
 }
@@ -405,9 +423,12 @@ function ZoomOnRequest({ geojson, geosid, seq, overrideGeojson }) {
   const geojsonRef  = useRef(geojson);
   const geosidRef   = useRef(geosid);
   const overrideRef = useRef(overrideGeojson);
-  geojsonRef.current  = geojson;
-  geosidRef.current   = geosid;
-  overrideRef.current = overrideGeojson;
+  // Before the effect below, which reads them in the same commit.
+  useEffect(() => {
+    geojsonRef.current  = geojson;
+    geosidRef.current   = geosid;
+    overrideRef.current = overrideGeojson;
+  });
 
   useEffect(() => {
     if (!seq) return;
@@ -433,7 +454,7 @@ function ZoomOnRequest({ geojson, geosid, seq, overrideGeojson }) {
     if (!features.length) return;
     const bounds = L.geoJSON(features).getBounds();
     if (bounds?.isValid()) map.fitBounds(bounds, { maxZoom: 10, padding: [20, 20] });
-  }, [seq, map]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [seq, map]);
 
   return null;
 }
@@ -448,6 +469,15 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
   onViewportChange, // ([west, south, east, north], initial) on mount and after each pan/zoom
   onSelectionSettled, // () once a new selection's zoom is decided
   values,        // Map<geosid, displayValue> — swapped on variable/mode change, layer persists
+  // Bivariate mode (docs/BIVARIATE-MAP.md): buildBivariate's result, null otherwise.
+  bivariate = null,
+  values2 = null,
+  secondLabel = "",
+  xPercent = false,
+  yPercent = false,
+  rawCountNote = null,
+  highlightCell = null,   // { i, j } | null: the legend cell in focus
+  onHighlightCell,
   level,
   year,
   theme,
@@ -475,7 +505,6 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
   // The basemap credit normally lives in the selector panel. When that panel is
   // collapsed it has nowhere to go, and ODbL/CARTO both require it to stay
   // visible — so it comes back into the map corner instead.
-  showAttribution = false,
   // The panel toggles are open-only affordances: each appears on the map edge
   // where its panel will appear, and disappears once that panel is open (the
   // panel carries its own close control).
@@ -617,17 +646,19 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
   // layer mount, and calling the mount-time prop directly would capture stale
   // state in App's closures (e.g. the Shift+click toggle reading an outdated
   // refGeosid).
-  hoverCtxRef.current = { values, valueMode, theme, themeLabel, code, codeLabel, ctCmaNames, onSelectGeosid, onSelectRefGeosid };
+  useLayoutEffect(() => {
+    hoverCtxRef.current = { values, valueMode, theme, themeLabel, code, codeLabel, ctCmaNames, onSelectGeosid, onSelectRefGeosid, bivariate, values2, secondLabel, xPercent, yPercent };
+  });
 
-  // Clear the layer registry when the GeoJSON remounts, during render: the new
-  // layer's onEachFeature fills it while this same render's children mount, so
-  // an effect here would run afterwards and empty it, and every restyle pass
-  // below would find no layers to restyle.
-  const registryKeyRef = useRef(mapKey);
-  if (registryKeyRef.current !== mapKey) {
-    registryKeyRef.current = mapKey;
-    layersByGeosid.current = {};
-  }
+  // The layer registry, one per GeoJSON mount. The new layer's onEachFeature fills
+  // its entry while this same render's children mount, so an effect here runs
+  // afterwards: it can drop the earlier mounts' entries, but must not empty this
+  // one, or every restyle pass below would find no layers to restyle.
+  useEffect(() => {
+    for (const key of Object.keys(layersByGeosid.current)) {
+      if (key !== mapKey) delete layersByGeosid.current[key];
+    }
+  }, [mapKey]);
 
   // Drop any pending hover whenever the GeoJSON remounts
   useEffect(() => {
@@ -653,9 +684,22 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
     if (isDisputedFeature(feature)) {
       return { fillColor: getDisputedPattern(), fillOpacity: 1, weight: 1, color: "#7a7a7a", opacity: 0.9, dashArray: "4 3", smoothFactor: 1 };
     }
+    // Opaque and unblended: the reader matches nine colours to the legend, so
+    // the fill must be exactly the legend's colour.
+    if (bivariate && !isPlaceholderFeature(feature)) {
+      const cell = bivariate.cells.get(String(gid));
+      if (cell) {
+        const dimmed = highlightCell && (cell.i !== highlightCell.i || cell.j !== highlightCell.j);
+        const fillStyle = { fillColor: bivariate.colors[cell.i + bivariate.size * cell.j], weight: 0.5, color: "#ffffff", opacity: 0.8, fillOpacity: dimmed ? 0.12 : 1, smoothFactor: 1 };
+        if (isFocal) return { ...fillStyle, color: COLOR_FOCAL, weight: 6, opacity: 1 };
+        if (isRef) return { ...fillStyle, color: COLOR_REF, weight: 4, opacity: 1 };
+        return fillStyle;
+      }
+    }
     // Base style for NA / no numeric value; placeholder residuals take it
     // whatever the tables hold for their code.
     if (
+      (bivariate && !bivariate.cells.has(String(gid))) ||
       isMissing ||
       isPlaceholderFeature(feature) ||
       !decileTransBreaks ||
@@ -711,29 +755,24 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
     return baseStyle;
   };
 
-  // Keep styleFnRef current so the selection-change effect always sees latest values
-  styleFnRef.current = styleFn;
-  // The GeoJSON layer gets this STABLE callback. react-leaflet restyles every
-  // feature whenever `style` changes identity, so passing styleFn itself
-  // repainted the whole choropleth on every render (each search keystroke,
-  // each hover tooltip). Value, palette and selection changes restyle
-  // through the effects below instead; new layers style through the ref.
-  const layerStyle = useCallback((feature) => styleFnRef.current(feature), []);
+  // Keep styleFnRef current so the restyle effects below and the event handlers
+  // always see the latest values. A layout effect, so it's set before those run.
+  useLayoutEffect(() => { styleFnRef.current = styleFn; });
 
   // Imperatively re-style EVERY layer when the values map (or its binning)
   // changes: the Leaflet layer persists across variable / percent-toggle
   // changes, so a restyle pass replaces what used to be a full SVG rebuild.
   useEffect(() => {
-    for (const layers of Object.values(layersByGeosid.current)) {
+    for (const layers of Object.values(layersByGeosid.current[mapKey] ?? {})) {
       for (const layer of layers) {
         try {
           layer.setStyle(styleFnRef.current(layer.feature));
-        } catch (_) {
+        } catch {
           // layer may have been removed during GeoJSON remount
         }
       }
     }
-  }, [values, decileTransBreaks, decilePalette, transformForBins]);
+  }, [values, decileTransBreaks, decilePalette, transformForBins, bivariate, highlightCell, mapKey]);
 
   // Imperatively re-style layers when focal or ref selection changes
   useEffect(() => {
@@ -745,11 +784,11 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
     );
 
     for (const gid of toUpdate) {
-      const layers = layersByGeosid.current[gid] || [];
+      const layers = layersByGeosid.current[mapKey]?.[gid] || [];
       for (const layer of layers) {
         try {
           layer.setStyle(styleFnRef.current(layer.feature));
-        } catch (_) {
+        } catch {
           // layer may have been removed during GeoJSON remount
         }
       }
@@ -758,9 +797,9 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
     // Bring selected layers to front so their borders render above all others.
     // Ref first, focal second — focal ends up on top when they overlap.
     for (const gid of [selectedRefGeosid, selectedGeosid].filter(Boolean)) {
-      const layers = layersByGeosid.current[gid] || [];
+      const layers = layersByGeosid.current[mapKey]?.[gid] || [];
       for (const layer of layers) {
-        try { layer.bringToFront(); } catch (_) {}
+        try { layer.bringToFront(); } catch { /* layer may have been removed during GeoJSON remount */ }
       }
     }
 
@@ -780,10 +819,8 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
 
     // Register layer so we can imperatively update its style later
     if (geosid && geosid !== "N/A") {
-      if (!layersByGeosid.current[geosid]) {
-        layersByGeosid.current[geosid] = [];
-      }
-      layersByGeosid.current[geosid].push(layer);
+      const registry = (layersByGeosid.current[mapKey] ??= {});
+      (registry[geosid] ??= []).push(layer);
     }
 
     const geoname = props.geoname ?? props.geosid ?? "N/A";
@@ -803,7 +840,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
         e.target.setStyle({
           weight: 2,
           color: "#000",
-          fillOpacity: isMissingValue ? 1 : hoverAlpha,
+          ...(ctx.bivariate ? {} : { fillOpacity: isMissingValue ? 1 : hoverAlpha }),
         });
         clearTimeout(hoverTimerRef.current);
         hoverTimerRef.current = setTimeout(() => {
@@ -848,7 +885,18 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
           // arrives separately. Read at hover time like everything else here,
           // since it lands after the layers are bound.
           const contextName = ctx.ctCmaNames?.[String(geosid)] ?? prname;
-          setHoverTooltip({ geoname, prname: contextName, themeLine, categoryLine, valueStr, x: pt.x, y: pt.y });
+          // Bivariate: both values, each with its class.
+          let second = null;
+          let firstClass = null;
+          if (ctx.bivariate) {
+            const cell = ctx.bivariate.cells.get(String(geosid));
+            const y = ctx.values2?.get(String(geosid));
+            const fmt = (v, pct) => (v == null || !Number.isFinite(Number(v)) ? "N/A" : pct ? `${Number(v).toFixed(1)}%` : Number(v).toLocaleString());
+            const names = classNames(ctx.bivariate.size);
+            firstClass = cell ? names[cell.i] : null;
+            second = { label: ctx.secondLabel, value: fmt(y, ctx.yPercent), cls: cell ? names[cell.j] : null };
+          }
+          setHoverTooltip({ geoname, prname: contextName, themeLine: ctx.bivariate ? "" : themeLine, categoryLine, valueStr, firstClass, second, x: pt.x, y: pt.y });
         }, HOVER_POPUP_DELAY_MS);
       },
       mouseout: (e) => {
@@ -879,8 +927,6 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
     }
   };
 
-  const defaultCenter = [57, -96];
-  const defaultZoom = 4;
   const defMinZoom = 4;
 
   if (import.meta.env.DEV) console.log(
@@ -916,7 +962,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
 
   return (
     <div style={{ position: "relative", height, width: "100%" }}>
-      <style>{`.leaflet-overlay-pane { mix-blend-mode: multiply; }`}</style>
+      <style>{`.leaflet-overlay-pane { mix-blend-mode: ${bivariate ? "normal" : "multiply"}; }`}</style>
       {/* SVG pattern defs — referenced by Leaflet polygon fills and the legend swatch */}
       <svg width="0" height="0" style={{ position: "absolute" }}>
         <defs>
@@ -929,8 +975,8 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
         </defs>
       </svg>
       <MapContainer
-        center={defaultCenter}
-        zoom={defaultZoom}
+        center={NATIONAL_CENTER}
+        zoom={NATIONAL_ZOOM}
         minZoom={defMinZoom}
         // Canvas renderer: one canvas per pane instead of ~5k SVG DOM nodes —
         // much faster mount/pan/zoom on CSD/CT layers. Requires the
@@ -970,17 +1016,17 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
             )}
 
             {hasData && (
-              <GeoJSON
+              <ChoroplethLayer
                 key={mapKey}
                 data={featureCollection}
-                style={layerStyle}
+                style={styleFn}
                 onEachFeature={onEachFeature}
               />
             )}
 
             <MapInit mapRef={mapRef} />
             <ViewportReporter onChange={onViewportChange} />
-            <ZoomToNational center={defaultCenter} zoom={defaultZoom} />
+            <ZoomToNational center={NATIONAL_CENTER} zoom={NATIONAL_ZOOM} />
             <MapBackground showBasemap={showBasemap} />
             <MapResizer layoutKey={layoutKey} />
             <ZoomToSelected
@@ -1120,7 +1166,14 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
               ? <>{hoverTooltip.categoryLine}: <strong>{hoverTooltip.valueStr}</strong></>
               : <strong>{hoverTooltip.valueStr}</strong>
             }
+            {hoverTooltip.firstClass && ` (${hoverTooltip.firstClass})`}
           </div>
+          {hoverTooltip.second && (
+            <div>
+              {hoverTooltip.second.label}: <strong>{hoverTooltip.second.value}</strong>
+              {hoverTooltip.second.cls && ` (${hoverTooltip.second.cls})`}
+            </div>
+          )}
         </div>
       )}
 
@@ -1158,7 +1211,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
         </p>
       )}
 
-      {showAttribution && (
+      {showBasemap && (
         <div
           style={{
             position: "absolute",
@@ -1209,7 +1262,23 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
           pointerEvents: "none",
         }}
       >
-      {hasData && decileRawBreaks && decilePalette && (
+      {/* The plots rail's square plot is the key while the rail is open. */}
+      {hasData && bivariate && !plotsOpen && (
+        <BivariateLegend
+          ref={legendRef}
+          bivariate={bivariate}
+          xLabel={codeLabel}
+          yLabel={secondLabel}
+          year={year}
+          xPercent={xPercent}
+          yPercent={yPercent}
+          note={rawCountNote}
+          isDark={isDark}
+          highlightCell={highlightCell}
+          onHighlightCell={onHighlightCell}
+        />
+      )}
+      {hasData && !bivariate && decileRawBreaks && decilePalette && (
         <div
           ref={legendRef}
           style={{

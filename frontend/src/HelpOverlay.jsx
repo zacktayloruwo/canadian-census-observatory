@@ -57,7 +57,7 @@ export default function HelpOverlay({ steps, onClose }) {
 
   // Prefer placing the callout below the target; flip above if it would
   // overflow the viewport bottom.
-  const calloutHeight = 150; // rough estimate, enough for the overflow check
+  const calloutHeight = step.calloutHeight ?? 150; // rough estimate, enough for the overflow check
   const placeBelow = highlightRect.top + highlightRect.height + GAP + calloutHeight <= window.innerHeight;
   const calloutTop = placeBelow
     ? highlightRect.top + highlightRect.height + GAP

@@ -120,11 +120,14 @@ const PlotsTray = forwardRef(function PlotsTray(
     hasFocal = true,
     hasRef,
     profile,
+    relationship,
     overTime,
   },
   forwardedRef,
 ) {
   const isDark = colorScheme === "dark";
+  // Under the square plot the rail scrolls anyway, so the other two keep room.
+  const sectionMin = relationship ? SECTION_MIN_HEIGHT + 80 : SECTION_MIN_HEIGHT;
   const series = seriesColors(colorScheme);
   const border = isDark ? "#373a40" : "#dee2e6";
   const panel = isDark ? "#1a1b1e" : "#ffffff";
@@ -192,11 +195,20 @@ const PlotsTray = forwardRef(function PlotsTray(
           minHeight floor still applies, and the body scrolls when the rail is
           too short to honour it — a squashed axis is worse than a scrollbar. */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
-        <div style={{ flex: "1 1 0", minHeight: SECTION_MIN_HEIGHT, padding: "10px 10px 10px 16px", boxSizing: "border-box" }}>
+        {relationship && (
+          <>
+            {/* Sized by its content: the plot inside is square. */}
+            <div style={{ flex: "0 0 auto", padding: "10px 10px 10px 16px", boxSizing: "border-box" }}>
+              {relationship}
+            </div>
+            <div style={{ height: 1, background: border, flexShrink: 0 }} />
+          </>
+        )}
+        <div style={{ flex: "1 1 0", minHeight: sectionMin, padding: "10px 10px 10px 16px", boxSizing: "border-box" }}>
           {profile}
         </div>
         <div style={{ height: 1, background: border, flexShrink: 0 }} />
-        <div style={{ flex: "1 1 0", minHeight: SECTION_MIN_HEIGHT, padding: "10px 10px 10px 16px", boxSizing: "border-box" }}>
+        <div style={{ flex: "1 1 0", minHeight: sectionMin, padding: "10px 10px 10px 16px", boxSizing: "border-box" }}>
           {overTime}
         </div>
       </div>
