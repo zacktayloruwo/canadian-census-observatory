@@ -331,9 +331,11 @@ export default function App() {
 
   // Treat as non-count if:
   //  - the theme itself is nc, OR
-  //  - the selected code has t_level == -1
+  //  - the selected code has t_level == -1, OR
+  //  - it is a theme's total (t_level 0), offered only by total-only themes
+  //    (Population, the dwelling counts): a count, but not a share of anything
   const isNonCountVariable =
-    state.themeType === "nc" || state.codeLevel === -1;
+    state.themeType === "nc" || state.codeLevel === -1 || state.codeLevel === 0;
 
   const effectiveValueMode = isNonCountVariable ? "raw" : state.valueMode;
   // A new selection resets a plot that failed to draw (PlotErrorBoundary).
@@ -758,7 +760,7 @@ useEffect(() => {
 // never a default here.
 // Lineages by code AND year (a code names one unit only in its own year),
 // shared as promises so a year change awaits the prefetch instead of racing
-// it. A 404 (no lineage: ct, cma, pr) is cached as null; a network failure
+// it. No lineage (ct, cma, pr) comes back as null and is cached; a network failure
 // is dropped so the next call retries.
 const lineageCache = useRef(new Map());
 const getLineage = (geosid, year, level = null) => {
@@ -1177,11 +1179,20 @@ const [codeOptions, setCodeOptions] = useState([]);
 // variable has ceased to exist (a year change with a variable that exists in
 // both years used to lose it exactly this way).
 const [codesLoading, setCodesLoading] = useState(false);
+// The level|theme|year the options in codeOptions belong to. The clear and
+// the loading flag below land a render late: in the same pass as a theme
+// change, the default-code effect still sees the old theme's list, and used
+// to select its first variable under the new theme (a stray values and
+// cs-plot fetch, a 404 for a total-only theme). It acts only on a list that
+// matches the current selection.
+const codesForRef = useRef(null);
 
 useEffect(() => {
+  const key = `${state.level}|${state.theme}|${state.year}`;
+  const landOptions = (opts) => { codesForRef.current = key; setCodeOptions(opts); };
   // Need level, theme, and year before we can load codes
   if (!state.level || !state.theme || !state.year) {
-    setCodeOptions([]);
+    landOptions([]);
     setCodesLoading(false);
     return;
   }
@@ -1190,6 +1201,7 @@ useEffect(() => {
   // default-code effect below resurrect the OLD theme's t_code mid-cascade,
   // firing a values/series fetch that is instantly superseded. The loading
   // flag keeps that effect from reading the empty list as "no variable".
+  codesForRef.current = null;
   setCodeOptions([]);
   setCodesLoading(true);
 
@@ -1205,7 +1217,7 @@ useEffect(() => {
       const res = await apiFetch(url.toString());
       if (!res.ok) {
         console.error("Failed to fetch codes", res.status, res.statusText);
-        if (!cancelled) setCodeOptions([]);
+        if (!cancelled) landOptions([]);
         return;
       }
 
@@ -1227,7 +1239,7 @@ useEffect(() => {
             codeLevel: null,
           });
         }
-        setCodeOptions(data || []);
+        landOptions(data || []);
         return;
       }
 
@@ -1255,11 +1267,11 @@ useEffect(() => {
       }
       // Options land after the selection is settled, so the default-code
       // effect sees a list that already contains the current t_code.
-      setCodeOptions(data);
+      landOptions(data);
     } catch (err) {
       console.error("Error fetching codes:", err);
       if (!cancelled) {
-        setCodeOptions([]);
+        landOptions([]);
       }
     } finally {
       if (!cancelled) setCodesLoading(false);
@@ -1276,9 +1288,10 @@ useEffect(() => {
 
 
 useEffect(() => {
-  // A refetch is in flight: the empty/old list says nothing about whether the
-  // current variable exists in the new level/theme/year. Wait for it.
-  if (codesLoading) return;
+  // A refetch is in flight, or the list is still another selection's: it says
+  // nothing about whether the current variable exists in the new
+  // level/theme/year. Wait for it.
+  if (codesLoading || codesForRef.current !== `${state.level}|${state.theme}|${state.year}`) return;
 
   if (!codeOptions || codeOptions.length === 0) {
     // no codes for this theme/year/level → clear t_code
@@ -1309,7 +1322,7 @@ useEffect(() => {
     codeLabel: first.t_name ?? first.t_code,
     codeLevel: first.t_level ?? null,
   });
-}, [codeOptions, codesLoading, state.t_code, state.intendedCode, dispatch]);
+}, [codeOptions, codesLoading, state.level, state.theme, state.year, state.t_code, state.intendedCode, dispatch]);
 
 // The variable on screen is a stand-in for the one the user picked.
 const codeFallback = Boolean(state.intendedCode && state.t_code && state.t_code !== state.intendedCode);
@@ -1772,8 +1785,10 @@ const ncRows = useMemo(() => {
 }, [mapView, ctCmaNames]);
 
 useEffect(() => {
-  // Only run this for categorical variables
-  if (state.themeType !== "cat" && state.themeType !== "catm") {
+  // Only run this for categorical variables; a total-only theme (its total,
+  // t_level 0, is the variable) has no categories to plot. Wait for the
+  // theme's codes (codeLevel null until they land) to know which it is.
+  if ((state.themeType !== "cat" && state.themeType !== "catm") || state.codeLevel == null || state.codeLevel === 0) {
     setCsPayload(null);
     return;
   }
@@ -1829,6 +1844,7 @@ useEffect(() => {
   return () => controller.abort();
 }, [
   state.themeType,
+  state.codeLevel,
   state.level,
   state.year,
   state.theme,
@@ -2564,7 +2580,11 @@ useEffect(() => {
                 ]}
               />
               {isNonCountVariable && (
-                <Text size="xs" c="dimmed" mt={4}>Percent is unavailable for non-count measures.</Text>
+                <Text size="xs" c="dimmed" mt={4}>
+                  {state.codeLevel === 0
+                    ? "Percent is unavailable for totals."
+                    : "Percent is unavailable for non-count measures."}
+                </Text>
               )}
 
               {/*<Switch
@@ -2895,7 +2915,7 @@ useEffect(() => {
                 { ref: helpRefGeoRef, title: "Comparison geography", text: "Optionally pick a second geography to compare against the one you selected." },
                 { ref: helpDisplayOptsRef, title: "Display options", text: "Switch between percent and absolute values, and toggle the base map on or off." },
                 { ref: helpMapRef, title: "The map", text: "Shows the selected variable across the map's geographies, shaded by value. Click a geography to select it." },
-                { ref: helpLegendRef, title: "Legend", text: "Shows how map shading maps to values, and how areas with no data are marked." },
+                { ref: helpLegendRef, title: "Legend", text: "Shows how map shading maps to values, and how areas with no data are marked. The toggle sets the classes: Deciles splits the places into ten groups of equal size; Percentage shades in fixed ten-point steps (0–10%, 10–20%, … 90–100%), so maps of different variables or years share one scale. Percentage is available when Display options is set to Percent." },
                 { ref: plotsTrayRef, title: "Plots", text: "The profile of the selected geography and its change over census years, side by side. Collapse the tray with the chevron to give the map its full height back." },
                 { ref: mapBivariate && plotsOpen ? helpBivariateRef : helpSecondRef, calloutHeight: 300, title: "Bivariate view", text: "\"Compare with a second variable\" colours the map by two variables at once. Each is split into four classes at its quartiles, giving 16 colours: teal deepens as the first variable rises, purple as the second rises, and dark means both are high. The plot in the right bar shows one dot per place over those colours, with white lines at the quartiles and a red line of best fit. Hover a band to find its places on the map. Correlations describe places, not individuals. Available when Display options is set to Percent." },
               ]}

@@ -2,7 +2,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, forwardRef } from "react";
 import L from "leaflet";
 import { MapContainer, TileLayer, GeoJSON, useMap, useMapEvents, Pane, ZoomControl } from "react-leaflet";
-import { useMantineColorScheme } from "@mantine/core";
+import { useMantineColorScheme, SegmentedControl, Group } from "@mantine/core";
+import { IconLock } from "@tabler/icons-react";
 import { faCanadianMapleLeaf } from "@fortawesome/free-brands-svg-icons";
 import { faChartSimple, faFilter } from "@fortawesome/free-solid-svg-icons";
 import BivariateLegend from "./BivariateLegend";
@@ -562,11 +563,19 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
   const defaultAlpha = 0.7;
   const hoverAlpha = 1;
 
+  // --- Classes: deciles, or fixed 10-point percentage classes ------------
+  // The legend's toggle. "percentage" applies only while values are percents;
+  // the choice is kept, so switching back to Percent restores it.
+  const [classMode, setClassMode] = useState("deciles"); // "deciles" | "percentage"
+  const fixedPercent = classMode === "percentage" && valueMode === "percent";
+
   // --- Build decile breaks in (optionally) transformed space -------------
   // Memoized: recomputed only when the values map (or transform mode) changes,
   // not on every render.
   // - decileTransBreaks: breaks in transformed space (for bin assignment)
   // - decileRawBreaks: breaks in raw value space (for legend labels)
+  // In fixedPercent mode the breaks are 10, 20, ... 90 and classes are
+  // half-open ([0,10), [10,20), ... [90,100]), so 10% sits in the 10-20 class.
   const { decileTransBreaks, decileRawBreaks, decilePalette, transformForBins } =
     useMemo(() => {
       const identity = (x) => x;
@@ -577,6 +586,16 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
         transformForBins: identity,
       };
       if (!values || values.size === 0) return empty;
+
+      if (fixedPercent) {
+        const breaks = [10, 20, 30, 40, 50, 60, 70, 80, 90];
+        return {
+          decileTransBreaks: breaks,
+          decileRawBreaks: breaks,
+          decilePalette: Array.from({ length: 10 }, (_, i) => infernoColor((i + 0.5) / 10)),
+          transformForBins: identity,
+        };
+      }
 
       const useAsinh = useLogScale && valueMode === "raw";
       const transform = useAsinh ? (x) => Math.asinh(x) : identity;
@@ -616,7 +635,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
         decilePalette: palette,
         transformForBins: transform,
       };
-    }, [values, useLogScale, valueMode]);
+    }, [values, useLogScale, valueMode, fixedPercent]);
 
   // --- Layer ref tracking (for imperative style updates) -------------------
 
@@ -728,7 +747,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
 
     let bin = 9;
     for (let i = 0; i < decileTransBreaks.length; i++) {
-      if (vT <= decileTransBreaks[i]) {
+      if (fixedPercent ? vT < decileTransBreaks[i] : vT <= decileTransBreaks[i]) {
         bin = i;
         break;
       }
@@ -772,7 +791,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
         }
       }
     }
-  }, [values, decileTransBreaks, decilePalette, transformForBins, bivariate, highlightCell, mapKey]);
+  }, [values, decileTransBreaks, decilePalette, transformForBins, fixedPercent, bivariate, highlightCell, mapKey]);
 
   // Imperatively re-style layers when focal or ref selection changes
   useEffect(() => {
@@ -1312,17 +1331,48 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
           {/* Five equal cells over ten equal classes: each label right-aligns on
               the boundary after classes 2, 4, 6, 8 and 10. */}
           <div style={{ display: "flex", fontSize: 12, marginTop: 3, fontVariantNumeric: "tabular-nums" }}>
-            {[1, 3, 5, 7].map((b) => (
-              <div key={b} style={{ flex: 1, textAlign: "right" }}>{formatVal(decileRawBreaks[b])}</div>
-            ))}
-            <div style={{ flex: 1, textAlign: "right" }}>{formatVal(decileRawBreaks[8])}+</div>
+            {fixedPercent
+              ? [20, 40, 60, 80, 100].map((b) => (
+                  <div key={b} style={{ flex: 1, textAlign: "right" }}>{b}%</div>
+                ))
+              : <>
+                  {[1, 3, 5, 7].map((b) => (
+                    <div key={b} style={{ flex: 1, textAlign: "right" }}>{formatVal(decileRawBreaks[b])}</div>
+                  ))}
+                  <div style={{ flex: 1, textAlign: "right" }}>{formatVal(decileRawBreaks[8])}+</div>
+                </>}
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
             <svg width="14" height="14" style={{ flexShrink: 0, display: "block", borderRadius: 2, border: `1px solid ${isDark ? "#777" : "#999"}` }}>
               <rect width="14" height="14" fill="url(#noDataHatch)" />
             </svg>
-            <span style={{ fontSize: 12 }}>No data · 10 equal-count classes</span>
+            {/* The toggle names the classing (Deciles: 10 equal-count classes;
+                Percentage: 10-point classes), so the note no longer does. */}
+            <span style={{ fontSize: 12 }}>No data</span>
+            {/* Percentage classes need percent values: locked otherwise, as
+                the Display options' Percent half is for non-count measures. */}
+            <SegmentedControl
+              size="xs"
+              ml="auto"
+              aria-label="Map classes"
+              value={fixedPercent ? "percentage" : "deciles"}
+              onChange={setClassMode}
+              styles={{ label: { fontSize: 11, padding: "1px 7px" } }}
+              data={[
+                { value: "deciles", label: "Deciles" },
+                {
+                  value: "percentage",
+                  disabled: valueMode !== "percent",
+                  label: (
+                    <Group gap={4} justify="center" wrap="nowrap" title={valueMode !== "percent" ? "Needs Display options set to Percent" : undefined}>
+                      {valueMode !== "percent" && <IconLock size={11} stroke={2.2} />}
+                      <span>Percentage</span>
+                    </Group>
+                  ),
+                },
+              ]}
+            />
           </div>
         </div>
       )}
