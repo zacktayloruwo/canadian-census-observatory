@@ -354,13 +354,15 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
 
   // GET /api/lineage?geosid=&year=[&level=] → the geouid lineage this unit
   // belongs to in `year`: {geouid, status, first_year, last_year, members:[{time,
-  // geosid, geoname, status}]}; 404 when the concordance has no row for it.
+  // geosid, geoname, status}]}; null when the concordance has no row for it
+  // (always for ct, cma, pr). That is an answer, not a missing resource, so it
+  // is a 200: a 404 here logged a console error on every such unit selected.
   app.get("/api/lineage", (req, res) => {
     const { geosid } = req.query;
     const year = req.query.year ? Number(req.query.year) : null;
     if (!geosid || !year) return res.status(400).json({ error: "geosid and year are required" });
     const lin = lineageFor(geosid, year, req.query.level || null);
-    if (!lin) return res.status(404).json({ error: "no lineage for this unit" });
+    if (!lin) return res.json(null);
     const members = lin.members.map((m) => ({ time: m.time, geosid: m.geosid, geoname: m.geoname, status: m.status }));
     res.set("Cache-Control", "no-cache");
     res.json({ geouid: lin.geouid, level: lin.level, status: lin.status,
@@ -700,7 +702,9 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
   });
 
   // GET /api/codes?level=4&t_theme=dnk2&year=2021
-  // Returns distinct t_code / t_name for this level + theme + year
+  // Returns distinct t_code / t_name for this level + theme + year. A theme
+  // whose only row is its total (t_level 0: pop_, dwoc, dwpr, dwvc) offers that
+  // total, so it maps as a count; the frontend locks Percent for it.
   app.get("/api/codes", async (req, res) => {
     const levelNum = Number(req.query.level);
     const t_theme = req.query.t_theme;
@@ -735,7 +739,11 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
         AND t_theme = ?
         AND time    = ?
         AND t_code IS NOT NULL
-        AND t_level IN (1, -1)
+        AND (t_level IN (1, -1)
+             OR (t_level = 0 AND NOT EXISTS (
+                   SELECT 1 FROM all_descr c
+                   WHERE c.level = all_descr.level AND c.t_theme = all_descr.t_theme
+                     AND c.time = all_descr.time AND c.t_level IN (1, -1))))
       ORDER BY rowid
     `;
 
