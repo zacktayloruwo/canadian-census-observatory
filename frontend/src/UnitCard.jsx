@@ -16,7 +16,7 @@
 // Esc closes it and focus returns to the button that opened it.
 
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { FocusTrap, Text, Title, Table, Loader, Group, CloseButton, Paper } from "@mantine/core";
+import { FocusTrap, Text, Title, Table, Loader, Group, CloseButton, Paper, Button } from "@mantine/core";
 import { API_BASE, apiFetch } from "./data/edition";
 
 const LEVEL_NAME = { 1: "Census tract", 2: "Census subdivision", 3: "Census division", 4: "Metropolitan area", 5: "Province / territory" };
@@ -53,9 +53,10 @@ const BASE_YEARS = [1851, 1861, 1871, 1881, 1891, 1901, 1911, 1921, 1931, 1941, 
                     1961, 1971, 1976, 1981, 1986, 1991, 1996, 2001, 2006, 2011, 2016, 2021];
 const COL_W = 66, ROW_H = 36, PAD_X = 20, TOP = 26, MAX_PER_TRANSITION = 6;
 
-function layout(unit) {
+function layout(unit, showAll = false) {
   // One neighbour per lineage, from the events that link it to this one;
-  // at most MAX_PER_TRANSITION per transition and side are drawn.
+  // at most MAX_PER_TRANSITION per transition and side are drawn, unless the
+  // reader asked for all of them (showAll).
   const byGeouid = new Map();
   const perTransition = new Map();
   let hidden = 0;
@@ -63,7 +64,7 @@ function layout(unit) {
     if (!e.other || e.direction === "self") continue;
     const t = `${e.time_from}|${e.time_to}|${e.direction}`;
     const n = perTransition.get(t) ?? 0;
-    if (!byGeouid.has(e.other.geouid) && n >= MAX_PER_TRANSITION) { hidden++; continue; }
+    if (!showAll && !byGeouid.has(e.other.geouid) && n >= MAX_PER_TRANSITION) { hidden++; continue; }
     perTransition.set(t, n + 1);
     if (!byGeouid.has(e.other.geouid)) {
       byGeouid.set(e.other.geouid, { ...e.other, side: e.direction === "in" ? "above" : "below", links: [] });
@@ -100,7 +101,12 @@ function layout(unit) {
 }
 
 function LineageTimeline({ unit, year, accent, onJumpYear, onOpenNeighbour }) {
-  const L = layout(unit);
+  // "Show all": draws every linked place (Montréal 2006 has 13 merged in).
+  // The capped layout says how many the cap leaves out.
+  const [showAll, setShowAll] = useState(false);
+  const capped = layout(unit);
+  const full = capped.hidden ? layout(unit, true) : capped;
+  const L = showAll ? full : capped;
   const scrollRef = useRef(null);
   const yMain = L.yOf(0);
   const xCurrent = L.xOf(Number(year));
@@ -203,6 +209,11 @@ function LineageTimeline({ unit, year, accent, onJumpYear, onOpenNeighbour }) {
         {onOpenNeighbour ? ", or a grey track to open that place's timeline" : ""}.
         {L.hidden ? ` ${L.hidden} further linked place${L.hidden === 1 ? " is" : "s are"} listed below but not drawn.` : ""}
       </Text>
+      {capped.hidden > 0 && (
+        <Button size="compact-xs" variant="light" mt={6} onClick={() => setShowAll((v) => !v)}>
+          {showAll ? "Show fewer" : `Show all ${full.neighbours.length} linked places`}
+        </Button>
+      )}
     </div>
   );
 }
@@ -303,7 +314,7 @@ export default function UnitCard({ opened, onClose, geosid, year, level, accent,
             <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
               <section aria-labelledby="unit-tl">
                 <Text id="unit-tl" fw={600} mb={6}>Timeline</Text>
-                <LineageTimeline unit={unit} year={year} accent={accent} onJumpYear={onJumpYear}
+                <LineageTimeline key={unit.geouid} unit={unit} year={year} accent={accent} onJumpYear={onJumpYear}
                                  onOpenNeighbour={onOpenNeighbour ? (n) => onOpenNeighbour(n, unit.level) : null} />
                 {!unit.geouid && (
                   <Text size="xs" c="dimmed" mt={4}>
