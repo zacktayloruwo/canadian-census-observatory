@@ -16,6 +16,7 @@ import { ActionIcon, Text } from "@mantine/core";
 import { faCircleChevronRight } from "@fortawesome/free-solid-svg-icons";
 import FaIcon from "./FaIcon";
 import { seriesColors } from "./config";
+import { PlaceBadge } from "./PlaceBadge";
 
 export const RAIL_MIN_WIDTH = 260;
 export const RAIL_MAX_WIDTH = 560;
@@ -86,20 +87,12 @@ function RailResizeHandle({ width, min, max, onResize, onCollapse }) {
 }
 
 // One geography: swatch, then its name in its series colour.
-function GeoRow({ color, name }) {
+function GeoRow({ n, color, name }) {
   if (!name) return null;
   return (
+    // Baseline-aligned: the badge's number sits on the name's first line.
     <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 2 }}>
-      <span
-        style={{
-          width: 9,
-          height: 9,
-          borderRadius: 2,
-          background: color,
-          flexShrink: 0,
-          transform: "translateY(1px)",
-        }}
-      />
+      <PlaceBadge n={n} color={color} size={16} />
       <Text size="sm" fw={600} style={{ color, flex: 1, minWidth: 0, lineHeight: 1.3 }}>
         {name}
       </Text>
@@ -180,8 +173,8 @@ const PlotsTray = forwardRef(function PlotsTray(
         </div>
 
         <div style={{ marginTop: 6 }}>
-          {hasFocal && <GeoRow color={series.focal} name={focalLabel} />}
-          {hasRef && <GeoRow color={series.ref} name={refLabel} />}
+          {hasFocal && <GeoRow n={1} color={series.focal} name={focalLabel} />}
+          {hasRef && <GeoRow n={2} color={series.ref} name={refLabel} />}
           {!hasFocal && !hasRef && (
             <Text size="xs" c="dimmed">No geography selected</Text>
           )}

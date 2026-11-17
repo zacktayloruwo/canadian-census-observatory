@@ -16,7 +16,7 @@ export const COLOR_PROVINCE_BOUNDARY = "#777777";
 export const HOVER_POPUP_DELAY_MS = 25;
 
 // Global app metadata — edit these values when releasing updates.
-export const APP_VERSION = "0.9.2";
+export const APP_VERSION = "0.9.3";
 export const APP_LAST_UPDATED = "2026-11-17";
 // Update DATA_LAST_UPDATED whenever the census data is refreshed.
 export const DATA_LAST_UPDATED = "2026-09-12";

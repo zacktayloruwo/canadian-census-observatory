@@ -2,6 +2,8 @@
 import React, { useEffect, useRef } from "react";
 import echarts from "./echartsCore";
 import { Text, useMantineColorScheme } from "@mantine/core";
+import { seriesColors } from "./config";
+import { placeBadgeRich } from "./placeBadgeRich";
 
 // Height one legend row occupies: itemHeight + itemGap, matched to the legend
 // settings below so the grid reserves exactly what the legend uses.
@@ -82,7 +84,12 @@ function CatPlot({ data, hasRef: hasRefSelection = true }) {
             align: "right",
             verticalAlign: "top",
             offset: [-5, -30],
-            formatter: (params) => params.name,
+            // Row 0 is the geography, row 1 the second: numbered as elsewhere.
+            formatter: (params) => `{n${params.dataIndex + 1}|${params.dataIndex + 1}} ${params.name}`,
+            rich: {
+              n1: placeBadgeRich(seriesColors(colorScheme).focal),
+              n2: placeBadgeRich(seriesColors(colorScheme).ref),
+            },
           }
         : {
             show: true,

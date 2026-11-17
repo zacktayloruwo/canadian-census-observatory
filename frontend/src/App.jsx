@@ -19,7 +19,6 @@ import {
 } from "@mantine/core";
 import {
   IconSun, IconMoon,
-  IconFocus2,
   IconInfoCircle,
   IconLock,
 } from "@tabler/icons-react";
@@ -80,6 +79,9 @@ const initialState = {
 
   refGeosid: null,
   refLabel: "",
+  // "Add a second geography": off hides the second geography and remembers
+  // it, like secondOn; picking one (search or Shift+click) turns it on.
+  refOn: false,
 
   // Bivariate map: the second variable (docs/BIVARIATE-MAP.md). The code is
   // the user's pick and outlives a year or level that lacks it, like
@@ -122,7 +124,7 @@ function viewToSearch(state, page, card = null) {
   if (state.year) q.set("y", state.year);
   if (state.level) q.set("l", state.level);
   if (state.geosid) q.set("g", state.geosid);
-  if (state.refGeosid) q.set("r", state.refGeosid);
+  if (state.refOn && state.refGeosid) q.set("r", state.refGeosid);
   if (state.theme) q.set("t", state.theme);
   const code = state.intendedCode || state.t_code;   // the user's pick, not a fallback
   if (code) q.set("v", code);
@@ -148,6 +150,7 @@ function withView(state, view) {
     Object.assign(next, { intendedCode: view.t_code, intendedLabel: "" });
   }
   if ("refGeosid" in view && view.refGeosid !== state.refGeosid) next.refLabel = "";
+  if ("refGeosid" in view) next.refOn = Boolean(view.refGeosid);
   next.theme2 = view.theme2 ?? null;
   next.code2 = view.code2 ?? null;
   next.secondOn = Boolean(next.theme2 || next.code2);
@@ -247,12 +250,17 @@ function reducer(state, action) {
         ...state,
         useLogScale: action.useLogScale,
       };
+    // `on` marks a user's pick, which shows the second geography; label
+    // bookkeeping re-dispatches without it and leaves refOn alone.
     case "setRefPlace":
       return {
         ...state,
         refGeosid: action.geosid,
         refLabel: action.label ?? "",
+        refOn: action.on ?? state.refOn,
       };
+    case "setRefOn":
+      return { ...state, refOn: action.on };
 
     default:
       return state;
@@ -339,7 +347,7 @@ export default function App() {
 
   const effectiveValueMode = isNonCountVariable ? "raw" : state.valueMode;
   // A new selection resets a plot that failed to draw (PlotErrorBoundary).
-  const plotResetKey = `${state.geosid}|${state.refGeosid}|${state.year}|${state.level}|${state.t_code}|${effectiveValueMode}`;
+  const plotResetKey = `${state.geosid}|${state.refOn && state.refGeosid}|${state.year}|${state.level}|${state.t_code}|${effectiveValueMode}`;
 
   const logForNc = isNonCountVariable && state.useLogScale;
 
@@ -444,9 +452,10 @@ export default function App() {
     return same.some(({ g }) => g.year_min != null) ? -1 : same[0].i;
   };
 
-  // Effective reference geography — purely the user's explicit choice.
-  const effectiveRefGeosid = state.refGeosid || null;
-  const effectiveRefLabel  = state.refLabel  || "";
+  // Effective reference geography — the user's explicit choice, while the
+  // "Add a second geography" toggle is on.
+  const effectiveRefGeosid = (state.refOn && state.refGeosid) || null;
+  const effectiveRefLabel  = effectiveRefGeosid ? state.refLabel || "" : "";
   // The focal label the plots may show: gated on the geosid so a cleared
   // geography never survives as a name (selectedGeoLabel is kept for the
   // Select's own sentinel item and is not reliable on its own).
@@ -488,7 +497,7 @@ export default function App() {
         setSelectedGeoLabel(label);
         setGeoSearch(label);
       } else {
-        dispatch({ type: "setRefPlace", geosid, label });
+        dispatch({ type: "setRefPlace", geosid, label, on: true });
         setSelectedRefLabel(label);
         setRefSearch(label);
       }
@@ -906,7 +915,7 @@ useEffect(() => {
   const url = `${window.location.pathname}${search}${window.location.hash}`;
   if (push) window.history.pushState(null, "", url); else window.history.replaceState(null, "", url);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- the URL fields are the deps
-}, [state.year, state.level, state.geosid, state.refGeosid, state.theme, state.t_code, state.intendedCode, state.valueMode, state.secondOn, state.theme2, state.code2, activePage, cardFor]);
+}, [state.year, state.level, state.geosid, state.refGeosid, state.refOn, state.theme, state.t_code, state.intendedCode, state.valueMode, state.secondOn, state.theme2, state.code2, activePage, cardFor]);
 
 // Names for the search boxes when the view came from the URL (first load, or
 // Back/Forward): the entry for each unit IN ITS YEAR (a lineage entry is
@@ -2270,7 +2279,7 @@ useEffect(() => {
               {!secondAllowed && (
                 <Text size="xs" c="dimmed" mt={4}>
                   {isNonCountVariable
-                    ? "Comparing needs a variable that can be shown as a percent."
+                    ? "Comparison requires percentage variables."
                     : "Comparing needs Display options set to Percent."}
                 </Text>
               )}
@@ -2407,7 +2416,7 @@ useEffect(() => {
 
             {/* Focal geography */}
             <div ref={helpGeoSearchRef}>
-              <Text size="sm" fw={600} mb={4}>Select primary geography</Text>
+              <Text size="sm" fw={600} mb={4}>Select geography</Text>
               <Text size="xs" c="dimmed" mb={4}>
                 Enter a place name, postal code to find a census tract, or census geography id code (geosid)
               </Text>
@@ -2445,27 +2454,32 @@ useEffect(() => {
                     comboboxProps={{ zIndex: 1000 }}
                   />
                 </div>
+                {/* Numbered like the place everywhere it is named (PlaceBadge):
+                    a click zooms the map to it. */}
                 <ActionIcon
                   size={28}
-                  title="Zoom map to focal geography"
+                  radius="xl"
+                  title="Zoom map to geography 1"
+                  aria-label="Zoom map to geography 1"
                   disabled={!state.geosid}
                   onClick={() => setFocalZoomSeq(s => s + 1)}
                   style={{
-                    borderRadius: 6,
                     flexShrink: 0,
                     backgroundColor: state.geosid ? seriesColors(colorScheme).focal : undefined,
                     color: state.geosid ? "#ffffff" : undefined,
                     border: "none",
+                    fontSize: 14,
+                    fontWeight: 700,
                   }}
                 >
-                  <IconFocus2 size={15} />
+                  1
                 </ActionIcon>
                 <ActionIcon
                   size={28}
                   // Pressed while its card is open; a second click closes it.
                   variant={cardFor === "focal" ? "filled" : "default"}
                   title={cardFor === "focal" ? "Close the timeline" : "Show this place across census years"}
-                  aria-label="Show the primary geography across census years"
+                  aria-label="Show geography 1 across census years"
                   aria-pressed={cardFor === "focal"}
                   disabled={!state.geosid}
                   onClick={() => setCardFor((c) => (c === "focal" ? null : "focal"))}
@@ -2478,11 +2492,24 @@ useEffect(() => {
 
             {/*<Divider />*/}
 
-            {/* Reference geography */}
-            <div ref={helpRefGeoRef}>
-              <Text size="sm" fw={600} mb={4}>Select comparison geography</Text>
+            {/* Second geography: folds out from its toggle, as the second
+                variable does. Off hides it and keeps it (refOn); a pick in the
+                box or a Shift+click on the map turns it on. */}
+            {/* The Stack's sm gap pulled in to xs: the same gap as between
+                Variable and "Compare with a second variable". */}
+            <div ref={helpRefGeoRef} style={{ marginTop: "calc(var(--mantine-spacing-xs) - var(--mantine-spacing-sm))" }}>
+              <Switch
+                size="xs"
+                label="Add a second geography"
+                withThumbIndicator={false}
+                checked={state.refOn}
+                onChange={(e) => dispatch({ type: "setRefOn", on: e.currentTarget.checked })}
+              />
+              {state.refOn && (
+              <div style={{ borderLeft: `2px solid ${seriesColors(colorScheme).ref}`, paddingLeft: 8, marginTop: 6 }}>
+              <Text size="xs" fw={600}>Second geography</Text>
               <Text size="xs" c="dimmed" mb={4}>
-                Tip: Shift+click a map area to set or clear it as the comparison.
+                Shift+click map to set or clear.
               </Text>
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -2521,25 +2548,28 @@ useEffect(() => {
                 </div>
                 <ActionIcon
                   size={28}
-                  title="Zoom map to comparison geography"
+                  radius="xl"
+                  title="Zoom map to geography 2"
+                  aria-label="Zoom map to geography 2"
                   disabled={!effectiveRefGeosid}
                   onClick={() => setRefZoomSeq(s => s + 1)}
                   style={{
-                    borderRadius: 6,
                     flexShrink: 0,
                     backgroundColor: effectiveRefGeosid ? seriesColors(colorScheme).ref : undefined,
                     color: effectiveRefGeosid ? "#ffffff" : undefined,
                     border: "none",
+                    fontSize: 14,
+                    fontWeight: 700,
                   }}
                 >
-                  <IconFocus2 size={15} />
+                  2
                 </ActionIcon>
                 <ActionIcon
                   size={28}
                   // Pressed while its card is open; a second click closes it.
                   variant={cardFor === "ref" ? "filled" : "default"}
                   title={cardFor === "ref" ? "Close the timeline" : "Show this place across census years"}
-                  aria-label="Show the comparison geography across census years"
+                  aria-label="Show geography 2 across census years"
                   aria-pressed={cardFor === "ref"}
                   disabled={!effectiveRefGeosid}
                   onClick={() => setCardFor((c) => (c === "ref" ? null : "ref"))}
@@ -2548,6 +2578,8 @@ useEffect(() => {
                   <IconInfoCircle size={16} />
                 </ActionIcon>
               </div>
+              </div>
+              )}
             </div>
 
             {/*<Divider />*>}
@@ -2707,12 +2739,13 @@ useEffect(() => {
             }}
             onSelectRefGeosid={(geosid, geoname) => {
               if (mapView?.year !== stateRef.current.year) return;   // see onSelectGeosid
-              // Shift+click toggle: re-selecting the current comparison clears it.
-              if (state.refGeosid && String(state.refGeosid) === String(geosid)) {
+              // Shift+click toggle: re-selecting the shown second geography
+              // clears it (a hidden one is shown again instead, below).
+              if (effectiveRefGeosid && String(effectiveRefGeosid) === String(geosid)) {
                 clearRef();
                 return;
               }
-              dispatch({ type: "setRefPlace", geosid, label: geoname || geosid });
+              dispatch({ type: "setRefPlace", geosid, label: geoname || geosid, on: true });
               // Same label bookkeeping as the focal handler: resolve the
               // dropdown-format label so the comparison Select displays it.
               findEntryForUnit(geosid, stateRef.current.year)
@@ -2911,8 +2944,8 @@ useEffect(() => {
             <HelpOverlay
               steps={[
                 { ref: helpVariableRef, title: "Theme, variable, level, and year", text: "Choose a census theme, a variable within it, the level of geography to map, and the year. The year list covers every census the theme exists in; years that do not tabulate your variable are dimmed. Choose one anyway and the map shows the theme's first variable, with a note under Variable, until you return to a year that carries yours. Greyed levels lack the variable in the chosen year, and changing level clears the selected geographies." },
-                { ref: helpGeoSearchRef, title: "Search geography", text: "Find a place by name, postal code, or census geography id to focus the map on it. Picking a place at another level switches the level." },
-                { ref: helpRefGeoRef, title: "Comparison geography", text: "Optionally pick a second geography to compare against the one you selected." },
+                { ref: helpGeoSearchRef, title: "Select geography", text: "Find a place by name, postal code, or census geography id to focus the map on it. Picking a place at another level switches the level. The numbered button zooms the map to it; the place is marked 1 wherever it is named." },
+                { ref: helpRefGeoRef, title: "Second geography", text: "Turn on \"Add a second geography\" to compare a second place against the first; it is marked 2 wherever it is named. Shift+click a map area to set it (this turns the toggle on). Turning the toggle off hides the second geography and keeps it for when you turn it back on." },
                 { ref: helpDisplayOptsRef, title: "Display options", text: "Switch between percent and absolute values, and toggle the base map on or off." },
                 { ref: helpMapRef, title: "The map", text: "Shows the selected variable across the map's geographies, shaded by value. Click a geography to select it." },
                 { ref: helpLegendRef, title: "Legend", text: "Shows how map shading maps to values, and how areas with no data are marked. The toggle sets the classes: Deciles splits the places into ten groups of equal size; Percentage shades in fixed ten-point steps (0–10%, 10–20%, … 90–100%), so maps of different variables or years share one scale. Percentage is available when Display options is set to Percent." },

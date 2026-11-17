@@ -3,6 +3,8 @@ import React, { useEffect, useRef } from "react";
 import echarts from "./echartsCore";
 import { Text, useMantineColorScheme } from "@mantine/core";
 import { seriesColors } from "./config";
+import { placeBadgeRich } from "./placeBadgeRich";
+import { PlaceBadge } from "./PlaceBadge";
 
 /**
  * NCPlot: histogram of non-count values across all geos
@@ -181,17 +183,18 @@ function NCPlot({
         ? toAxisX(refInfo.value)
         : null;
 
-    // Rotated markLine labels sit alongside the line ("insideEndTop" = left of
-    // a vertical line, "insideEndBottom" = right). Each label goes on the
-    // outward side of its line — leftmost line labelled left, rightmost right —
-    // so the two labels can never collide however close the lines are.
+    // The numbered circles sit above the top of their lines ("end"): ECharts
+    // turns any label placed alongside a line to run with it, which stood the
+    // numbers on their side. With both lines, each circle goes on the outward
+    // side of its line (align right = left of it) so the two never collide
+    // however close the lines are; a lone line's circle is centred.
     const hasFocalLine = focalLineX != null;
     const hasRefLine = refLineX != null;
     const bothLines = hasFocalLine && hasRefLine;
-    const focalLabelPos =
-      bothLines && focalLineX > refLineX ? "insideEndBottom" : "insideEndTop";
-    const refLabelPos =
-      bothLines && refLineX >= focalLineX ? "insideEndBottom" : "insideEndTop";
+    const focalLabelAlign =
+      !bothLines ? "center" : focalLineX > refLineX ? "left" : "right";
+    const refLabelAlign =
+      !bothLines ? "center" : refLineX >= focalLineX ? "left" : "right";
 
     const option = {
       backgroundColor: "transparent",
@@ -260,12 +263,11 @@ function NCPlot({
                     lineStyle: { type: "solid", color: seriesColors(colorScheme).focal, width: 2 },
                     label: {
                       show: true,
-                      formatter: "Prim",
-                      position: focalLabelPos,
-                      distance: 6,
-                      color: seriesColors(colorScheme).focal,
-                      fontSize: 10,
-                      fontWeight: "bold",
+                      formatter: "{n|1}",
+                      rich: { n: placeBadgeRich(seriesColors(colorScheme).focal) },
+                      position: "end",
+                      align: focalLabelAlign,
+                      distance: 3,
                     },
                   }
                 : null,
@@ -275,12 +277,11 @@ function NCPlot({
                     lineStyle: { type: "dashed", color: seriesColors(colorScheme).ref, width: 2 },
                     label: {
                       show: true,
-                      formatter: "Comp",
-                      position: refLabelPos,
-                      distance: 6,
-                      color: seriesColors(colorScheme).ref,
-                      fontSize: 10,
-                      fontWeight: "bold",
+                      formatter: "{n|2}",
+                      rich: { n: placeBadgeRich(seriesColors(colorScheme).ref) },
+                      position: "end",
+                      align: refLabelAlign,
+                      distance: 3,
                     },
                   }
                 : null,
@@ -336,15 +337,21 @@ function NCPlot({
       {(showFocal || showRef) && (
         <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.6, flexShrink: 0 }}>
           {showFocal && (
-            <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <PlaceBadge n={1} color={seriesColors(colorScheme).focal} size={14} />
+              <span>
               <strong style={{ color: seriesColors(colorScheme).focal }}>{focalInfo.label}</strong>
               {": "}{formatVal(focalInfo.value)}
+              </span>
             </div>
           )}
           {showRef && (
-            <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <PlaceBadge n={2} color={seriesColors(colorScheme).ref} size={14} />
+              <span>
               <strong style={{ color: seriesColors(colorScheme).ref }}>{refInfo.label}</strong>
               {": "}{formatVal(refInfo.value)}
+              </span>
             </div>
           )}
         </div>
