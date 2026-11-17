@@ -1155,12 +1155,11 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
         geosid,
       });
 
+      // No rows for this unit (an unenumerated placeholder, or a place the
+      // theme does not cover): an empty answer, as /api/os-plot gives, not
+      // a 404, which logged a console error on every such selection.
       if (!focalDist.categories.length) {
-        return res.status(404).json({
-          supported: true,
-          type: "cat",
-          error: "No focal data found for that combination.",
-        });
+        return res.json({ supported: true, type: "cat", categories: [] });
       }
 
       // Reference: if ref_geosid provided, infer its level from HLOOK
