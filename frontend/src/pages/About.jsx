@@ -1,7 +1,19 @@
 // src/pages/About.jsx
 // The About page. Edit the text here; the type treatment is in About.css.
 import { COLOR_BRAND, COLOR_BRAND_DARK } from "../config";
+// Written by backend/scripts/data-stats.mjs from the database; re-run it with
+// each data refresh.
+import STATS from "../dataStats.json";
 import "./About.css";
+
+const fmt = (n) => Number(n).toLocaleString("en-CA");
+const DATA_FIGURES = [
+  { value: fmt(STATS.census_years), label: `census years, ${STATS.first_year}–${STATS.last_year}` },
+  { value: fmt(STATS.polygon_layers), label: "polygon layers (one per level and census)" },
+  { value: fmt(STATS.polygon_years), label: "distinct polygon-years" },
+  { value: `${(STATS.data_points / 1e6).toFixed(1)} million`, label: "unique data points (place × census × variable)" },
+  { value: `${(STATS.db_bytes / 1e9).toFixed(1)} GB`, label: "database size" },
+];
 
 export default function About() {
   return (
@@ -54,6 +66,19 @@ export default function About() {
             The basemap used in the UNI·CEN Canadian Census Observatory is provided by <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> and <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>, and the map is drawn with <a href="https://leafletjs.com/" target="_blank" rel="noreferrer">Leaflet</a>. The territorial extent of Canada in early years, and boundary disputes between provinces, is represented with reference to the <a href="https://doi.org/10.5683/SP2/IQ7E0X" target="_blank" rel="noreferrer">Historical Atlas of Canada, Territorial Evolution</a> (CC BY-NC 4.0).
           </p>
 
+        </section>
+
+        <section>
+          <h2>The Data in Numbers</h2>
+          <dl className="about-stats">
+            {DATA_FIGURES.map((f) => (
+              <div key={f.label} className="about-stat">
+                <dt>{f.label}</dt>
+                <dd>{f.value}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="about-stats-note">As of the data build of {STATS.db_built}.</p>
         </section>
       </article>
     </div>

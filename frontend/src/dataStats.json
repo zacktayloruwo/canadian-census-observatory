@@ -1,0 +1,11 @@
+{
+  "db_md5": "a20a7b12ad885ffa6aee726ea54b5eaa",
+  "census_years": 25,
+  "first_year": 1851,
+  "last_year": 2021,
+  "polygon_layers": 95,
+  "polygon_years": 145758,
+  "data_points": 106749029,
+  "db_bytes": 4949028864,
+  "db_built": "2026-11-06"
+}

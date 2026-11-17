@@ -62,3 +62,42 @@
   color: var(--mantine-color-anchor);
   text-decoration: underline;
 }
+
+/* "The Data in Numbers": figure over label, in a grid that wraps on phones.
+   The label is the <dt> but reads second, so the order is set by flex. */
+.about-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin: 8px 0 0;
+}
+
+.about-stat {
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-end;
+  padding: 12px 14px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: 8px;
+}
+
+.about-stat dd {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.about-stat dt {
+  margin-top: 4px;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  color: var(--mantine-color-dimmed);
+}
+
+.about-content p.about-stats-note {
+  margin-top: 12px;
+  font-size: 0.875rem;
+  color: var(--mantine-color-dimmed);
+}
