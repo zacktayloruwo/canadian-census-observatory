@@ -353,11 +353,18 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
   });
 
   // GET /api/lineage?geosid=&year=[&level=] → the geouid lineage this unit
-  // belongs to in `year`: {geouid, status, first_year, last_year, members:[{time,
+  // belongs to in `year`: {geouid, status, label, first_year, last_year, members:[{time,
   // geosid, geoname, status}]}; null when the concordance has no row for it
   // (always for ct, cma, pr). That is an answer, not a missing resource, so it
   // is a 200: a 404 here logged a console error on every such unit selected.
-  app.get("/api/lineage", (req, res) => {
+  // label: the lineage's search-list label (server.js GEO_LABEL_BY_UID). It
+  // needs the search index, so the first lineage request loads it.
+  let geoLabelByUid = null;
+  const labelForUid = async (geouid) => {
+    geoLabelByUid ??= new Map((await loadGeoData()).filter((g) => g.geouid).map((g) => [g.geouid, g.label]));
+    return geoLabelByUid.get(String(geouid)) ?? null;
+  };
+  app.get("/api/lineage", async (req, res) => {
     const { geosid } = req.query;
     const year = req.query.year ? Number(req.query.year) : null;
     if (!geosid || !year) return res.status(400).json({ error: "geosid and year are required" });
@@ -366,6 +373,7 @@ export async function createApi({ duckAll, readJson, readTopology, topologyParts
     const members = lin.members.map((m) => ({ time: m.time, geosid: m.geosid, geoname: m.geoname, status: m.status }));
     res.set("Cache-Control", "no-cache");
     res.json({ geouid: lin.geouid, level: lin.level, status: lin.status,
+               label: await labelForUid(lin.geouid),
                first_year: members[0]?.time ?? null, last_year: members[members.length - 1]?.time ?? null,
                members });
   });

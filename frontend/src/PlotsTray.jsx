@@ -87,16 +87,25 @@ function RailResizeHandle({ width, min, max, onResize, onCollapse }) {
 }
 
 // One geography: swatch, then its name in its series colour.
-function GeoRow({ n, color, name }) {
+// censusName: what the unit was called in `year`, shown under its label
+// when it differs ("In 1961: Unorganized - Rural Part"). The row is
+// baseline-aligned: the badge's number sits on the name's first line.
+function GeoRow({ n, color, name, censusName, year }) {
   if (!name) return null;
   return (
-    // Baseline-aligned: the badge's number sits on the name's first line.
+    <>
     <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 2 }}>
       <PlaceBadge n={n} color={color} size={16} />
       <Text size="sm" fw={600} style={{ color, flex: 1, minWidth: 0, lineHeight: 1.3 }}>
         {name}
       </Text>
     </div>
+    {censusName && (
+      <Text size="xs" c="dimmed" style={{ marginLeft: 22, lineHeight: 1.3 }}>
+        In {year}: {censusName}
+      </Text>
+    )}
+    </>
   );
 }
 
@@ -110,6 +119,9 @@ const PlotsTray = forwardRef(function PlotsTray(
     variableLabel,
     focalLabel,
     refLabel,
+    focalCensusName = null,
+    refCensusName = null,
+    year,
     hasFocal = true,
     hasRef,
     profile,
@@ -173,8 +185,8 @@ const PlotsTray = forwardRef(function PlotsTray(
         </div>
 
         <div style={{ marginTop: 6 }}>
-          {hasFocal && <GeoRow n={1} color={series.focal} name={focalLabel} />}
-          {hasRef && <GeoRow n={2} color={series.ref} name={refLabel} />}
+          {hasFocal && <GeoRow n={1} color={series.focal} name={focalLabel} censusName={focalCensusName} year={year} />}
+          {hasRef && <GeoRow n={2} color={series.ref} name={refLabel} censusName={refCensusName} year={year} />}
           {!hasFocal && !hasRef && (
             <Text size="xs" c="dimmed">No geography selected</Text>
           )}

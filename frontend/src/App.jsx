@@ -443,6 +443,16 @@ export default function App() {
   // (entryIsUnit); fall back to the first with that geosid. -1 when none.
   const optionIndexFor = (opts, geosid, year) => {
     if (!geosid) return -1;
+    // A lineage entry is filed under its last year's code, so in its other
+    // years the selected code is not its geosid (Gloucester 1951 is 3504002,
+    // its entry 3506006): find it by the unit's geouid, once its lineage
+    // lookup has landed (geouidFor). Without this the sentinel item repeated
+    // the entry's label.
+    const geouid = geouidFor[`${geosid}|${year}`];
+    if (geouid) {
+      const i = opts.findIndex((g) => g.geouid && String(g.geouid) === String(geouid));
+      if (i >= 0) return i;
+    }
     const same = opts.map((g, i) => ({ g, i })).filter(({ g }) => String(g.geosid) === String(geosid));
     if (!same.length) return -1;
     const hit = same.find(({ g }) => entryIsUnit(g, geosid, year));
@@ -772,6 +782,10 @@ useEffect(() => {
 // it. No lineage (ct, cma, pr) comes back as null and is cached; a network failure
 // is dropped so the next call retries.
 const lineageCache = useRef(new Map());
+// The resolved geouid of each code|year looked up, for render-time use: the
+// geography Selects find a lineage entry by it (optionIndexFor). The focal
+// and comparison selections are always looked up (the prefetch below).
+const [geouidFor, setGeouidFor] = useState({});
 const getLineage = (geosid, year, level = null) => {
   const key = `${geosid}|${year}`;
   const cache = lineageCache.current;
@@ -779,6 +793,10 @@ const getLineage = (geosid, year, level = null) => {
     if (cache.size >= 200) cache.delete(cache.keys().next().value);
     const p = apiFetch(`${API_BASE}/api/lineage?geosid=${encodeURIComponent(geosid)}&year=${year}${level ? `&level=${level}` : ""}`)
       .then((r) => (r.ok ? r.json() : null))
+      .then((lin) => {
+        if (lin?.geouid) setGeouidFor((m) => (m[key] === lin.geouid ? m : { ...m, [key]: lin.geouid }));
+        return lin;
+      })
       .catch(() => { cache.delete(key); return null; });
     cache.set(key, p);
   }
@@ -799,16 +817,22 @@ const findEntryForUnit = async (geosid, year) => {
   const ids = [...new Set([String(geosid), last ? String(last.geosid) : null].filter(Boolean))];
   const lists = await Promise.all(ids.map((id) =>
     apiFetch(`${API_BASE}/api/geos?q=${encodeURIComponent(id)}`).then((r) => (r.ok ? r.json() : []))));
+  // A code search finds every entry that ever used the code, in any year:
+  // other places (Darlington's 1911 code was Kitley's and Ernestown's in other
+  // censuses). Only the entries that are this unit in `year` are kept, so the
+  // Select lists the clicked place and nothing else.
+  const isThisUnit = (g) =>
+    (lin && g.geouid && String(g.geouid) === String(lin.geouid)) || entryIsUnit(g, geosid, year);
   const seen = new Set();
   const matches = lists.flat().filter((g) => {
     const k = `${g.geosid}|${g.label}`;
-    if (seen.has(k)) return false;
+    if (seen.has(k) || !isThisUnit(g)) return false;
     seen.add(k);
     return true;
   });
   const found =
     (lin && matches.find((g) => g.geouid && String(g.geouid) === String(lin.geouid))) ||
-    matches.find((g) => entryIsUnit(g, geosid, year)) ||
+    matches[0] ||
     null;
   return { matches, found };
 };
@@ -828,7 +852,11 @@ const fetchGeoYears = (geosid, year, level = null) =>
     .then((ys) => ys.map(Number))
     .catch(() => []);
 
+// The search list's label (lin.label) names the unit as a search or map pick
+// does; the census-year name is the fallback, and the plots panel shows it
+// where it differs (censusName).
 const lineageLabel = (lin, m) =>
+  lin.label ??
   `${m.geoname ?? m.geosid} - ${(LEVEL_LABEL[lin.level] ?? "").toUpperCase()} (${lin.first_year === lin.last_year ? lin.first_year : `${lin.first_year}-${lin.last_year}`})`;
 
 // One line under the Year field explaining a selection the year change
@@ -1737,6 +1765,25 @@ const mapView = useMemo(() => {
   return mapViewRef.current;
 }, [geometryPayload, valuesPayload, displayValues, secondReady, wantSecond, display2Values, values2Payload]);
 const mapBivariate = mapView?.bivariate?.usable ? mapView.bivariate : null;
+
+// The name a selected unit carried in the shown census, for the plots panel
+// when it differs from the search-list label's name (Whitbourne (T) is
+// "Unorganized - Rural Part" in 1961). Read from the map's own features, so
+// only while the map shows the selection's year; types such as "(T)" and
+// letter case do not count as a difference.
+const censusNames = useMemo(() => {
+  const out = { focal: null, ref: null };
+  if (!mapView || mapView.year !== state.year) return out;
+  const base = (t) => String(t ?? "").replace(/\s+-\s+(CSD|CD|CMA|PR|CT)\b.*$/, "")
+    .replace(/\s*\([^)]*\)\s*$/, "").trim().toLowerCase();
+  const nameOf = (geosid, label) => {
+    if (!geosid || !label) return null;
+    const f = mapView.geometry.features.find((x) => String(x.properties?.geosid) === String(geosid));
+    const name = f?.properties?.geoname;
+    return name && base(name) !== base(label) ? name : null;
+  };
+  return { focal: nameOf(state.geosid, effectiveFocalLabel), ref: nameOf(effectiveRefGeosid, effectiveRefLabel) };
+}, [mapView, state.year, state.geosid, effectiveFocalLabel, effectiveRefGeosid, effectiveRefLabel]);
 const [biCell, setBiCell] = useState(null);   // legend cell in focus: { i, j } | null
 
 // A pick from the URL has no label until a list carries it; once one has, the
@@ -2842,6 +2889,9 @@ useEffect(() => {
             variableLabel={state.codeLabel}
             focalLabel={geoDisplayName(effectiveFocalLabel)}
             refLabel={geoDisplayName(effectiveRefLabel)}
+            focalCensusName={censusNames.focal}
+            refCensusName={censusNames.ref}
+            year={state.year}
             hasFocal={!!state.geosid}
             hasRef={!!effectiveRefGeosid}
             profile={
@@ -2933,10 +2983,11 @@ useEffect(() => {
             // A grey track: that lineage becomes the primary geography, in the
             // census of the link (Scarborough 1996 from Toronto 2001); the
             // card follows it.
-            onOpenNeighbour={cardFor === "focal" ? (n, lvl) => {
+            onOpenNeighbour={cardFor === "focal" ? async (n, lvl) => {
               const span = n.first_year === n.last_year ? `${n.first_year}` : `${n.first_year}-${n.last_year}`;
+              const lin = await getLineage(String(n.geosid), n.time, lvl);
               changeYear(n.time, { focal: { geosid: String(n.geosid),
-                label: `${n.geoname ?? n.geosid} - ${(LEVEL_LABEL[lvl] ?? "").toUpperCase()} (${span})` } });
+                label: lin?.label ?? `${n.geoname ?? n.geosid} - ${(LEVEL_LABEL[lvl] ?? "").toUpperCase()} (${span})` } });
             } : null}
           />
 
