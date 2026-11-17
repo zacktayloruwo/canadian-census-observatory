@@ -1059,7 +1059,11 @@ useEffect(() => {
 // read as the current one. Its years narrow availableYears below.
 // The bivariate view needs Display options on Percent. The choice of second
 // variable stays in state, so switching back to Percent restores it.
-const secondAllowed = effectiveValueMode === "percent";
+// Comparison takes a percentage or a non-count measure (median, average,
+// density, rate: a nc theme or a t_level -1 code) on either axis, never a
+// count: counts mostly track population size. A total (t_level 0) is a count.
+const firstIsMeasure = state.themeType === "nc" || state.codeLevel === -1;
+const secondAllowed = effectiveValueMode === "percent" || firstIsMeasure;
 const secondActive = state.secondOn && secondAllowed;
 const secondCode = secondActive ? state.code2 : null;
 const code2Key = secondActive && state.level && state.year && state.theme2 ? `${state.level}|${state.year}|${state.theme2}` : null;
@@ -1687,7 +1691,7 @@ useEffect(() => {
     .then(async (res) => {
       if (!res.ok) return setValues2Payload({ ...landed, rows: [], failed: true });
       const data = await res.json();
-      setValues2Payload({ ...landed, rows: data.rows ?? [], t_denom: data.t_denom ?? null });
+      setValues2Payload({ ...landed, rows: data.rows ?? [], t_denom: data.t_denom ?? null, t_level: data.t_level ?? null });
     })
     .catch((err) => { if (err.name !== "AbortError") setValues2Payload({ ...landed, rows: [], failed: true }); });
   return () => controller.abort();
@@ -1715,8 +1719,15 @@ const displayValues = useMemo(() => {
   return m;
 }, [valuesPayload, effectiveValueMode]);
 
-// One Percent toggle for both variables; each uses it if it can be a percent.
-const yPercent = state.valueMode === "percent" && !!values2Payload?.t_denom;
+// The first variable follows Display options; the second is always a
+// percent when it can be one (a comparison never takes a count), else a
+// non-count measure in its own units.
+const yPercent = !!values2Payload?.t_denom;
+const theme2Type = topicOptions.find((t) => t.value === state.theme2)?.t_type ?? null;
+// A category this year can't turn into a percent (no denominator) would be a
+// raw count: it is not compared (secondNotice says why).
+const secondIsCount = Boolean(values2Payload && !values2Payload.failed && theme2Type !== "nc" &&
+  values2Payload.t_level != null && Number(values2Payload.t_level) >= 0 && !values2Payload.t_denom);
 const xPercent = effectiveValueMode === "percent" && !!valuesPayload?.t_denom;
 const display2Values = useMemo(() => {
   if (!values2Payload) return null;
@@ -1756,14 +1767,14 @@ const mapView = useMemo(() => {
       geometryKey: geometryPayload.key ?? "",
       values: displayValues,
       values2: wantSecond ? display2Values : null,
-      bivariate: wantSecond ? buildBivariate(displayValues, display2Values, 4) : null,
+      bivariate: wantSecond && !secondIsCount ? buildBivariate(displayValues, display2Values, 4) : null,
       secondFailed: wantSecond && Boolean(values2Payload?.failed),
       level: geometryPayload.level,
       year: geometryPayload.year,
     };
   }
   return mapViewRef.current;
-}, [geometryPayload, valuesPayload, displayValues, secondReady, wantSecond, display2Values, values2Payload]);
+}, [geometryPayload, valuesPayload, displayValues, secondReady, wantSecond, secondIsCount, display2Values, values2Payload]);
 const mapBivariate = mapView?.bivariate?.usable ? mapView.bivariate : null;
 
 // The name a selected unit carried in the shown census, for the plots panel
@@ -1800,6 +1811,7 @@ const secondNotice = (() => {
   if (secondCode === state.t_code) return "Choose a different second variable: this is the same as the first.";
   const b = mapView?.bivariate;
   if (mapView?.secondFailed) return `Couldn't load ${code2Name}. Showing ${firstName} alone.`;
+  if (secondIsCount) return `${code2Name[0].toUpperCase()}${code2Name.slice(1)} can't be shown as a percent in ${state.year}. Showing ${firstName} alone.`;
   if (!b || b.usable) return null;
   if (b.reason === "empty") return `${code2Name[0].toUpperCase()}${code2Name.slice(1)} is not tabulated for ${LEVEL_NAME[state.level]} in ${state.year}. Showing ${firstName} alone until a year that carries it.`;
   const who = b.unusable === "first" ? firstName : b.unusable === "second" ? code2Name : "These variables";
@@ -1807,9 +1819,6 @@ const secondNotice = (() => {
 })();
 const sameThemeNote = secondCode && state.theme2 === state.theme && state.themeType !== "nc"
   ? "Two categories of one total are partly related by construction."
-  : null;
-const rawCountNote = mapBivariate && ((valuesPayload?.t_denom && !xPercent) || (values2Payload?.t_denom && !yPercent))
-  ? "Raw counts mostly reflect population size."
   : null;
 
 // Rows for the non-count histogram (NCPlot): geoname from geometry properties,
@@ -2326,7 +2335,7 @@ useEffect(() => {
               {!secondAllowed && (
                 <Text size="xs" c="dimmed" mt={4}>
                   {isNonCountVariable
-                    ? "Comparison requires percentage variables."
+                    ? "Comparison needs a percentage or a measure such as a median or density, not a count."
                     : "Comparing needs Display options set to Percent."}
                 </Text>
               )}
@@ -2356,7 +2365,8 @@ useEffect(() => {
                     }}
                     data={[
                       ...code2Options
-                        .filter((c) => c.t_code !== state.t_code)
+                        // A total (t_level 0) is a count: not comparable.
+                        .filter((c) => c.t_code !== state.t_code && Number(c.t_level) !== 0)
                         .sort((a, b) => (a.t_name ?? a.t_code).localeCompare(b.t_name ?? b.t_code, "en", { sensitivity: "base" }))
                         .map((c) => ({ value: c.t_code, label: c.t_name ?? c.t_code })),
                       // Kept selectable where this year lacks it, so the field still names the pick.
@@ -2734,7 +2744,6 @@ useEffect(() => {
             secondLabel={code2Name}
             xPercent={xPercent}
             yPercent={yPercent}
-            rawCountNote={rawCountNote}
             highlightCell={mapBivariate ? biCell : null}
             onHighlightCell={setBiCell}
             level={mapView?.level ?? null}
@@ -2948,7 +2957,6 @@ useEffect(() => {
                   refGeosid={effectiveRefGeosid}
                   highlightCell={biCell}
                   onHighlightCell={setBiCell}
-                  note={rawCountNote}
                 />
               </PlotErrorBoundary>
               </div>
@@ -3001,7 +3009,7 @@ useEffect(() => {
                 { ref: helpMapRef, title: "The map", text: "Shows the selected variable across the map's geographies, shaded by value. Click a geography to select it." },
                 { ref: helpLegendRef, title: "Legend", text: "Shows how map shading maps to values, and how areas with no data are marked. The toggle sets the classes: Deciles splits the places into ten groups of equal size; Percentage shades in fixed ten-point steps (0–10%, 10–20%, … 90–100%), so maps of different variables or years share one scale. Percentage is available when Display options is set to Percent." },
                 { ref: plotsTrayRef, title: "Plots", text: "The profile of the selected geography and its change over census years, side by side. Collapse the tray with the chevron to give the map its full height back." },
-                { ref: mapBivariate && plotsOpen ? helpBivariateRef : helpSecondRef, calloutHeight: 300, title: "Bivariate view", text: "\"Compare with a second variable\" colours the map by two variables at once. Each is split into four classes at its quartiles, giving 16 colours: teal deepens as the first variable rises, purple as the second rises, and dark means both are high. The plot in the right bar shows one dot per place over those colours, with white lines at the quartiles and a red line of best fit. Hover a band to find its places on the map. Correlations describe places, not individuals. Available when Display options is set to Percent." },
+                { ref: mapBivariate && plotsOpen ? helpBivariateRef : helpSecondRef, calloutHeight: 300, title: "Bivariate view", text: "\"Compare with a second variable\" colours the map by two variables at once. Each is split into four classes at its quartiles, giving 16 colours: teal deepens as the first variable rises, purple as the second rises, and dark means both are high. The plot in the right bar shows one dot per place over those colours, with white lines at the quartiles and a red line of best fit. Hover a band to find its places on the map. Correlations describe places, not individuals. Each variable must be a percentage (Display options set to Percent) or a measure such as a median, average or density; counts are left out because they mostly reflect population size." },
               ]}
               onClose={() => setShowHelpOverlay(false)}
             />

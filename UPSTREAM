@@ -1,5 +1,5 @@
 # Written by tools/sync-frontend.sh: the unicen_js commits this repo is in step with.
 # frontend = shared frontend files copied from that commit
 # server   = backend/server.js at that commit is what frontend/src/data/routes.js ports
-frontend=8f21f1f4ec9b1f49c02ce9ca9c7a80dc0be5e38b
+frontend=13803927bc130378d345154b9387a59beb2aac30
 server=f01d639011696d771c560a6392f873665f82ccdf
