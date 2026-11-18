@@ -46,6 +46,13 @@ function isSuppressedFeature(feature) {
   return flagFalse(feature?.properties?.in_canada);
 }
 const isPlaceholderFeature = (feature) => flagTrue(feature?.properties?.is_placeholder);
+
+// Leaflet's own simplification is off. It simplifies each polygon's outline
+// separately at every zoom, so neighbours simplified the same shared boundary
+// differently and left slivers at wide zooms (1,061 gap pixels against 284 on
+// CSDs 2021 at national zoom). The boundaries are already simplified once, from
+// shared arcs, when the topology is built.
+const SMOOTH_FACTOR = 0;
 // Disputed territory (the 1881 Ontario-Manitoba dispute, from the Historical
 // Atlas of Canada through the boundary pipeline): drawn as a grey diagonal
 // hatch over the province overlay, never a unit (no hover, no click).
@@ -701,7 +708,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
       !Number.isFinite(Number(rawVal));
 
     if (isDisputedFeature(feature)) {
-      return { fillColor: getDisputedPattern(), fillOpacity: 1, weight: 1, color: "#7a7a7a", opacity: 0.9, dashArray: "4 3", smoothFactor: 1 };
+      return { fillColor: getDisputedPattern(), fillOpacity: 1, weight: 1, color: "#7a7a7a", opacity: 0.9, dashArray: "4 3", smoothFactor: SMOOTH_FACTOR };
     }
     // Opaque and unblended: the reader matches nine colours to the legend, so
     // the fill must be exactly the legend's colour.
@@ -709,7 +716,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
       const cell = bivariate.cells.get(String(gid));
       if (cell) {
         const dimmed = highlightCell && (cell.i !== highlightCell.i || cell.j !== highlightCell.j);
-        const fillStyle = { fillColor: bivariate.colors[cell.i + bivariate.size * cell.j], weight: 0.5, color: "#ffffff", opacity: 0.8, fillOpacity: dimmed ? 0.12 : 1, smoothFactor: 1 };
+        const fillStyle = { fillColor: bivariate.colors[cell.i + bivariate.size * cell.j], weight: 0.5, color: "#ffffff", opacity: 0.8, fillOpacity: dimmed ? 0.12 : 1, smoothFactor: SMOOTH_FACTOR };
         if (isFocal) return { ...fillStyle, color: COLOR_FOCAL, weight: 6, opacity: 1 };
         if (isRef) return { ...fillStyle, color: COLOR_REF, weight: 4, opacity: 1 };
         return fillStyle;
@@ -730,7 +737,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
         color: "#ffffff",
         fillOpacity: 1,
         opacity: 0.8,
-        smoothFactor: 1,
+        smoothFactor: SMOOTH_FACTOR,
       };
 
       if (isFocal) {
@@ -761,7 +768,7 @@ const ChoroplethMap = forwardRef(function ChoroplethMap({
       color: "#ffffff",
       opacity: 0.8,
       fillOpacity: defaultAlpha,
-      smoothFactor: 1,
+      smoothFactor: SMOOTH_FACTOR,
     };
 
     if (isFocal) {
